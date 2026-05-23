@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/jack/Programming/HackTheMountain/visual/build",
+  "command": "/usr/sbin/c++   -std=gnu++23 -Wall -Wextra -Wpedantic -o CMakeFiles/visual.dir/src/main.cpp.o -c /home/jack/Programming/HackTheMountain/visual/src/main.cpp",
+  "file": "/home/jack/Programming/HackTheMountain/visual/src/main.cpp",
+  "output": "CMakeFiles/visual.dir/src/main.cpp.o"
+}
+]
