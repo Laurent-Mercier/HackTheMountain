@@ -23,6 +23,7 @@ import librosa
 import numpy as np
 import pyaudio
 import soundfile as sf
+from pythonosc.udp_client import SimpleUDPClient
 
 # --------------------------------------------------------------------------- #
 # Tunables                                                                    #
@@ -148,6 +149,68 @@ class RollingPeak:
     def normalize(self, x: np.ndarray) -> np.ndarray:
         self.peaks = np.maximum(self.peaks * self.decay, x.astype(np.float32))
         return np.clip(x / np.maximum(self.peaks, self.floor), 0.0, 1.0)
+
+
+# --------------------------------------------------------------------------- #
+# OSC sender — pushes feature snapshots to a visualizer over UDP localhost.   #
+# --------------------------------------------------------------------------- #
+
+class OscSender:
+    """Send each feature snapshot as one ``/audio/frame`` OSC message.
+
+    Wire schema (also documented in osc_receiver.cpp):
+
+        address: /audio/frame
+        types:   ,i + 42×f          (1 int + 42 floats)
+        args:
+          0  : seq                 (int, monotonic)
+          1  : t_seconds           (float, since start of stream)
+          2  : rms
+          3  : peak
+          4  : crest
+          5  : zcr
+          6  : centroid_hz
+          7  : rolloff_hz
+          8  : bandwidth_hz
+          9  : flatness
+          10 : onset_norm          (0..1)
+          11 : tempo_bpm           (-1.0 if unknown)
+          12-18 : bands_norm[7]    (0..1)
+          19-30 : chroma[12]       (0..1)
+          31-42 : mfcc[12]         (unbounded)
+    """
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 9000):
+        self.client = SimpleUDPClient(host, port)
+        self.host = host
+        self.port = port
+        self.seq = 0
+
+    def send(self, t: float, feats: dict) -> None:
+        tempo = feats.get("tempo")
+        values = [
+            int(self.seq),
+            float(t),
+            float(feats["rms"]),
+            float(feats["peak"]),
+            float(feats["crest"]),
+            float(feats["zcr"]),
+            float(feats["centroid"]),
+            float(feats["rolloff"]),
+            float(feats["bandwidth"]),
+            float(feats["flatness"]),
+            float(feats["onset_norm"]),
+            float(tempo) if tempo is not None else -1.0,
+        ]
+        values.extend(float(v) for v in feats["bands_norm"])
+        values.extend(float(v) for v in feats["chroma"])
+        values.extend(float(v) for v in feats["mfcc"])
+        try:
+            self.client.send_message("/audio/frame", values)
+        except OSError:
+            # Network hiccups should never kill the audio loop.
+            pass
+        self.seq += 1
 
 
 # --------------------------------------------------------------------------- #
@@ -331,7 +394,11 @@ def warmup_extractor(extractor: "FeatureExtractor") -> None:
     print(" done.")
 
 
-def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
+def play_and_analyze(
+    path: Path,
+    device_index: Optional[int] = None,
+    osc: Optional[OscSender] = None,
+) -> None:
     """File mode: stream from disk → speakers + feature dashboard."""
     rate, channels, blocks = load_streamer(path)
 
@@ -355,6 +422,8 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
         f"playing: {path.name} | {rate} Hz | {channels}ch | "
         f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
     )
+    if osc is not None:
+        print(f"sending OSC to {osc.host}:{osc.port} as /audio/frame")
     print(format_header())
 
     try:
@@ -371,6 +440,9 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
             feats = extractor(mono)
 
             t = frames_played / rate
+            if osc is not None:
+                osc.send(t, feats)
+
             if t - last_print_t >= 1.0 / PRINT_HZ:
                 print(format_dashboard(t, feats))
                 last_print_t = t
@@ -387,6 +459,7 @@ def listen_and_analyze(
     output_device: Optional[int] = None,
     rate: int = 44100,
     playback: bool = True,
+    osc: Optional[OscSender] = None,
 ) -> None:
     """Mic mode: capture from microphone → feature dashboard.
 
@@ -434,6 +507,8 @@ def listen_and_analyze(
         f"listening: mic | {rate} Hz | mono | "
         f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
     )
+    if osc is not None:
+        print(f"sending OSC to {osc.host}:{osc.port} as /audio/frame")
     print("(press Ctrl-C to stop"
           + (" and play back" if playback else "") + ")")
     print(format_header())
@@ -454,6 +529,9 @@ def listen_and_analyze(
             feats = extractor(mono)
 
             t = frames_read / rate
+            if osc is not None:
+                osc.send(t, feats)
+
             if t - last_print_t >= 1.0 / PRINT_HZ:
                 print(format_dashboard(t, feats))
                 last_print_t = t
@@ -561,6 +639,18 @@ def main() -> int:
         help="don't replay the recording when --mic is stopped with Ctrl-C",
     )
     parser.add_argument(
+        "--osc", action="store_true",
+        help="broadcast feature snapshots as OSC /audio/frame over UDP",
+    )
+    parser.add_argument(
+        "--osc-host", type=str, default="127.0.0.1",
+        help="OSC destination host (default 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--osc-port", type=int, default=9000,
+        help="OSC destination port (default 9000)",
+    )
+    parser.add_argument(
         "--list-devices", action="store_true",
         help="list audio devices and exit",
     )
@@ -577,6 +667,8 @@ def main() -> int:
         list_devices()
         return 0
 
+    osc = OscSender(args.osc_host, args.osc_port) if args.osc else None
+
     if args.mic:
         if args.song is not None:
             print("[info] --mic given; ignoring song path", file=sys.stderr)
@@ -586,6 +678,7 @@ def main() -> int:
                 output_device=args.device,
                 rate=args.rate,
                 playback=not args.no_playback,
+                osc=osc,
             )
         except KeyboardInterrupt:
             print("\ninterrupted.")
@@ -598,7 +691,7 @@ def main() -> int:
         return 1
 
     try:
-        play_and_analyze(args.song, device_index=args.device)
+        play_and_analyze(args.song, device_index=args.device, osc=osc)
     except KeyboardInterrupt:
         print("\ninterrupted.")
     return 0
