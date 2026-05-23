@@ -35,19 +35,22 @@ PRINT_HZ = 10     # dashboard refresh rate
 TEMPO_WINDOW_S = 4.0   # how much onset history to use for tempo estimation
 TEMPO_UPDATE_S = 2.0   # how often to recompute tempo
 
-# Standard 7-band EQ splits (Hz).
+# Three perceptually meaningful frequency bands (Hz).
 BANDS = [
-    ("sub",    20,    60),
-    ("bass",   60,    250),
-    ("lo-mid", 250,   500),
-    ("mid",    500,   2000),
-    ("hi-mid", 2000,  4000),
-    ("treble", 4000,  6000),
-    ("air",    6000,  16000),
+    ("bass",   20,    250),    # sub + bass
+    ("mid",    250,   4000),   # vocals + body + presence
+    ("treble", 4000,  16000),  # treble + air
 ]
+BAND_LABELS = [b[0] for b in BANDS]
+
+# Perceptual mapping ranges (used to produce 0..1 "intuitive" values).
+CENTROID_LOG_MIN = float(np.log(50.0))          # 50 Hz  → 0.0
+CENTROID_LOG_MAX = float(np.log(10000.0))       # 10 kHz → 1.0
+CREST_LOG_MIN    = float(np.log(1.4))           # sine (≈ √2) → smoothness 1
+CREST_LOG_MAX    = float(np.log(12.0))          # very spiky  → smoothness 0
+VOLUME_DB_FLOOR  = -80.0                        # rms ≤ 1e-4 reads as -80 dB
 
 NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-BLOCKS = " ▁▂▃▄▅▆▇█"   # 9 levels for unicode bar rendering
 
 
 # --------------------------------------------------------------------------- #
@@ -158,26 +161,25 @@ class RollingPeak:
 class OscSender:
     """Send each feature snapshot as one ``/audio/frame`` OSC message.
 
-    Wire schema (also documented in osc_receiver.cpp):
+    Schema (mirrored in osc_receiver.cpp — keep both in sync):
 
-        address: /audio/frame
-        types:   ,i + 42×f          (1 int + 42 floats)
+        address : /audio/frame
+        types   : ,i  f f f f f f f f f  i  f×12          (23 args)
         args:
-          0  : seq                 (int, monotonic)
-          1  : t_seconds           (float, since start of stream)
-          2  : rms
-          3  : peak
-          4  : crest
-          5  : zcr
-          6  : centroid_hz
-          7  : rolloff_hz
-          8  : bandwidth_hz
-          9  : flatness
-          10 : onset_norm          (0..1)
-          11 : tempo_bpm           (-1.0 if unknown)
-          12-18 : bands_norm[7]    (0..1)
-          19-30 : chroma[12]       (0..1)
-          31-42 : mfcc[12]         (unbounded)
+          0    seq           int    monotonic counter (loss detection)
+          1    t             float  seconds since stream start
+          2    volume_db     float  dBFS, clamped to [-80, 0]
+          3    bass          float  0..1   low-band   (20..250  Hz)
+          4    mid           float  0..1   mid-band   (250..4k  Hz)
+          5    treble        float  0..1   high-band  (4k..16k  Hz)
+          6    bpm           float  beats/min, -1.0 if unknown
+          7    smoothness    float  0..1   1 = sine-like, 0 = transient
+          8    centroid_hz   float  raw centroid in Hz
+          9    centroid_n    float  0..1   log-mapped centroid (50..10k Hz)
+          10   note          int    dominant pitch class 0..11 (C=0, B=11)
+          11-22 chroma[12]   float  pitch-class energies, each 0..1
+
+        Payload: ~136 bytes/packet. At chunk=2048 @ 44.1 kHz that's ~3 KB/s.
     """
 
     def __init__(self, host: str = "127.0.0.1", port: int = 9000):
@@ -186,29 +188,23 @@ class OscSender:
         self.port = port
         self.seq = 0
 
-    def send(self, t: float, feats: dict) -> None:
-        tempo = feats.get("tempo")
+    def send(self, t: float, f: dict) -> None:
         values = [
             int(self.seq),
             float(t),
-            float(feats["rms"]),
-            float(feats["peak"]),
-            float(feats["crest"]),
-            float(feats["zcr"]),
-            float(feats["centroid"]),
-            float(feats["rolloff"]),
-            float(feats["bandwidth"]),
-            float(feats["flatness"]),
-            float(feats["onset_norm"]),
-            float(tempo) if tempo is not None else -1.0,
+            float(f["volume_db"]),
+            float(f["bass"]), float(f["mid"]), float(f["treble"]),
+            float(f["bpm"]),
+            float(f["smoothness"]),
+            float(f["centroid_hz"]),
+            float(f["centroid_n"]),
+            int(f["note"]),
         ]
-        values.extend(float(v) for v in feats["bands_norm"])
-        values.extend(float(v) for v in feats["chroma"])
-        values.extend(float(v) for v in feats["mfcc"])
+        values.extend(float(v) for v in f["chroma"])
         try:
             self.client.send_message("/audio/frame", values)
         except OSError:
-            # Network hiccups should never kill the audio loop.
+            # Network hiccups must never kill the audio loop.
             pass
         self.seq += 1
 
@@ -225,12 +221,26 @@ except AttributeError:                           # pragma: no cover
 
 
 class FeatureExtractor:
-    """Streaming feature extractor.
+    """Streaming feature extractor — lean version.
 
-    Call the instance with each mono chunk (``float32``, length ``CHUNK``)
-    to get a dict of features. Keeps state for spectral flux (→ onset
-    strength) and for periodic tempo estimation.
+    Computes only the features that are actually sent over OSC. Drops the
+    heavy librosa calls (mel + mfcc + rolloff + bandwidth + flatness) for
+    a noticeable per-chunk CPU win. Per chunk we do:
+
+      * 1 ``np.fft.rfft``  (the FFT we'd have to do anyway)
+      * 1 ``librosa.chroma_stft`` (only librosa call left)
+      * everything else in plain NumPy
+
+    State: previous magnitude spectrum (for spectral flux), an onset-strength
+    history for periodic tempo estimation, and rolling-peak normalisers
+    for the three EQ bands.
     """
+
+    __slots__ = (
+        "rate", "chunk", "win", "freqs", "band_masks", "band_norm",
+        "prev_mag", "onset_history",
+        "tempo_update_chunks", "chunks_since_tempo", "tempo_bpm",
+    )
 
     def __init__(self, rate: int, chunk: int = CHUNK,
                  tempo_window_s: float = TEMPO_WINDOW_S,
@@ -238,17 +248,16 @@ class FeatureExtractor:
         self.rate = rate
         self.chunk = chunk
         self.win = np.hanning(chunk).astype(np.float32)
-        self.freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
+        self.freqs = np.fft.rfftfreq(chunk, 1.0 / rate).astype(np.float32)
         self.band_masks = [
             (self.freqs >= lo) & (self.freqs < hi) for _, lo, hi in BANDS
         ]
         self.band_norm = RollingPeak(len(BANDS), decay=0.995)
-        self.onset_norm = RollingPeak(1, decay=0.99)
 
-        # Spectral flux state
+        # Spectral-flux state (for onset envelope → tempo).
         self.prev_mag: Optional[np.ndarray] = None
 
-        # Onset envelope history for tempo estimation
+        # Onset envelope history → tempo.
         n_frames = int(np.ceil(tempo_window_s * rate / chunk))
         self.onset_history: deque = deque(maxlen=n_frames)
         self.tempo_update_chunks = int(np.ceil(tempo_update_s * rate / chunk))
@@ -258,50 +267,58 @@ class FeatureExtractor:
     def __call__(self, mono: np.ndarray) -> dict:
         rate = self.rate
 
-        # ---- time domain ---------------------------------------------------
-        rms = float(np.sqrt(np.mean(mono ** 2) + 1e-12))
-        peak = float(np.max(np.abs(mono)))
-        crest = peak / (rms + 1e-12)
-        zcr = float(np.mean(np.abs(np.diff(np.signbit(mono)))))
+        # ---- time domain (cheap) ------------------------------------------
+        sq = mono * mono
+        rms = float(np.sqrt(sq.mean() + 1e-12))
+        peak = float(np.abs(mono).max())
+        crest = peak / max(rms, 1e-9)
 
-        # ---- one windowed FFT, reused everywhere --------------------------
+        volume_db = max(20.0 * np.log10(max(rms, 1e-5)), VOLUME_DB_FLOOR)
+        # smoothness: 1.0 = sine-like (low crest), 0.0 = percussive transient.
+        spikiness = float(np.clip(
+            (np.log(max(crest, 1.4)) - CREST_LOG_MIN)
+            / (CREST_LOG_MAX - CREST_LOG_MIN),
+            0.0, 1.0,
+        ))
+        smoothness = 1.0 - spikiness
+
+        # ---- one FFT, magnitude spectrum ----------------------------------
         mag = np.abs(np.fft.rfft(mono * self.win)).astype(np.float32)
-        S_mag = mag[:, None]
-        S_pow = S_mag ** 2
+        mag_sum = float(mag.sum()) + 1e-12
 
-        # ---- spectral shape ------------------------------------------------
-        centroid  = float(librosa.feature.spectral_centroid (S=S_mag, sr=rate)[0, 0])
-        rolloff   = float(librosa.feature.spectral_rolloff  (S=S_mag, sr=rate)[0, 0])
-        bandwidth = float(librosa.feature.spectral_bandwidth(S=S_mag, sr=rate)[0, 0])
-        flatness  = float(librosa.feature.spectral_flatness (S=S_mag)        [0, 0])
+        # ---- spectral centroid (manual — faster than librosa for 1 frame) -
+        centroid_hz = float((self.freqs * mag).sum() / mag_sum)
+        centroid_n = float(np.clip(
+            (np.log(max(centroid_hz, 1.0)) - CENTROID_LOG_MIN)
+            / (CENTROID_LOG_MAX - CENTROID_LOG_MIN),
+            0.0, 1.0,
+        ))
 
-        # ---- band energies -------------------------------------------------
-        bands = np.array(
-            [float(np.sum(mag[m] ** 2)) for m in self.band_masks],
+        # ---- 3-band energies + perceptual normalisation -------------------
+        mag2 = mag * mag
+        bands_raw = np.array(
+            [float(mag2[m].sum()) for m in self.band_masks],
             dtype=np.float32,
         )
-        bands_norm = self.band_norm.normalize(bands)
+        bands_n = self.band_norm.normalize(bands_raw)
 
-        # ---- chroma & MFCC -------------------------------------------------
-        chroma = librosa.feature.chroma_stft(S=S_pow, sr=rate)[:, 0]
-        mel = librosa.feature.melspectrogram(S=S_pow, sr=rate, n_mels=64)
-        # MFCC 1..12 — drop coef 0 (overall log-energy ≈ rms).
-        mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel), n_mfcc=13)[1:, 0]
+        # ---- chroma (notes) -----------------------------------------------
+        chroma = librosa.feature.chroma_stft(
+            S=mag2[:, None], sr=rate,
+        )[:, 0]
+        note_idx = int(np.argmax(chroma))
 
-        # ---- onset strength (half-wave-rectified spectral flux) -----------
+        # ---- spectral flux → onset envelope (state for tempo) -------------
         if self.prev_mag is None or self.prev_mag.shape != mag.shape:
             onset_raw = 0.0
         else:
-            diff = np.maximum(mag - self.prev_mag, 0.0)
-            onset_raw = float(np.sqrt(np.sum(diff ** 2)))
+            diff = mag - self.prev_mag
+            np.maximum(diff, 0.0, out=diff)            # in-place HWR
+            onset_raw = float(np.sqrt((diff * diff).sum()))
         self.prev_mag = mag
-
-        onset_norm = float(
-            self.onset_norm.normalize(np.array([onset_raw], dtype=np.float32))[0]
-        )
         self.onset_history.append(onset_raw)
 
-        # ---- tempo (rolling buffer, infrequent) ---------------------------
+        # ---- tempo (rolling buffer, every ~2s) ----------------------------
         self.chunks_since_tempo += 1
         if (self.chunks_since_tempo >= self.tempo_update_chunks
                 and len(self.onset_history) == self.onset_history.maxlen):
@@ -317,16 +334,16 @@ class FeatureExtractor:
             self.chunks_since_tempo = 0
 
         return {
-            "rms": rms, "peak": peak, "crest": crest, "zcr": zcr,
-            "centroid": centroid, "rolloff": rolloff,
-            "bandwidth": bandwidth, "flatness": flatness,
-            "bands": bands,
-            "bands_norm": bands_norm,
-            "chroma": chroma,
-            "mfcc": mfcc,
-            "onset": onset_raw,
-            "onset_norm": onset_norm,
-            "tempo": self.tempo_bpm,
+            "volume_db":   volume_db,
+            "bass":        float(bands_n[0]),
+            "mid":         float(bands_n[1]),
+            "treble":      float(bands_n[2]),
+            "bpm":         self.tempo_bpm if self.tempo_bpm is not None else -1.0,
+            "smoothness":  smoothness,
+            "centroid_hz": centroid_hz,
+            "centroid_n":  centroid_n,
+            "note":        note_idx,
+            "chroma":      chroma.astype(np.float32),
         }
 
 
@@ -334,42 +351,52 @@ class FeatureExtractor:
 # Compact dashboard formatter                                                 #
 # --------------------------------------------------------------------------- #
 
-def _bars(values: np.ndarray) -> str:
-    """Render an array of 0..1 floats as a unicode block-bar string."""
-    n = len(BLOCKS) - 1
-    return "".join(BLOCKS[min(n, max(0, int(round(v * n))))] for v in values)
+DASHBOARD_HEIGHT = 9   # number of lines drawn by render_dashboard()
 
 
-def format_dashboard(t: float, f: dict) -> str:
-    band_bars = _bars(f["bands_norm"])
-    note_idx = int(np.argmax(f["chroma"]))
-    note = NOTES[note_idx]
-    note_strength = float(f["chroma"][note_idx])
+class Dashboard:
+    """ANSI-driven in-place dashboard renderer.
 
-    bpm = f"{f['tempo']:5.1f}" if f["tempo"] is not None else "  ---"
-    onset_bar = BLOCKS[min(len(BLOCKS) - 1, int(f["onset_norm"] * (len(BLOCKS) - 1)))]
+    First call prints the full dashboard. Subsequent calls move the cursor
+    up ``DASHBOARD_HEIGHT`` lines and overwrite each line, so the values
+    update in place instead of scrolling.
+    """
 
-    return (
-        f"t={t:6.2f}s │ "
-        f"[{band_bars}] │ "
-        f"rms={f['rms']:.3f} pk={f['peak']:.2f} crest={f['crest']:4.1f} "
-        f"zcr={f['zcr']:.2f} │ "
-        f"cen={f['centroid']:5.0f} rol={f['rolloff']:5.0f} "
-        f"bw={f['bandwidth']:4.0f} flat={f['flatness']:.2f} │ "
-        f"note={note:>2}({note_strength:.2f}) │ "
-        f"mfcc1..3=[{f['mfcc'][0]:+5.1f},{f['mfcc'][1]:+5.1f},{f['mfcc'][2]:+5.1f}] │ "
-        f"onset {onset_bar} │ "
-        f"{bpm} BPM"
-    )
+    def __init__(self, title: str = "audio (sender)"):
+        self.title = title
+        self.first = True
 
+    def render(self, t: float, f: dict, seq: int) -> None:
+        bands = [f["bass"], f["mid"], f["treble"]]
+        dom_band = BAND_LABELS[int(np.argmax(bands))]
 
-def format_header() -> str:
-    band_labels = " ".join(b[0][:3] for b in BANDS)
-    return (
-        f"    time   │ bands [{band_labels}] │ amplitude            │ "
-        f"timbre                          │ note      │ "
-        f"mfcc 1..3              │ onset │ tempo"
-    )
+        note_strength = float(f["chroma"][f["note"]])
+        note = NOTES[f["note"]] if note_strength > 0.20 else "--"
+        bpm_str = f"{f['bpm']:.1f}" if f["bpm"] > 0 else "---"
+
+        lines = [
+            f"─── {self.title} {'─' * (44 - len(self.title))}",
+            f"  Time:        {t:7.2f} s     (frame #{seq})",
+            f"  Volume:      {f['volume_db']:+6.1f} dB",
+            f"  Frequency:   {dom_band:<6}      "
+            f"(bass={bands[0]:.2f} mid={bands[1]:.2f} treble={bands[2]:.2f})",
+            f"  Centroid:    {f['centroid_hz']:6.0f} Hz    "
+            f"({f['centroid_n']*100:3.0f} % perceptual)",
+            f"  Smoothness:  {f['smoothness']:.2f}         (0 = spiky, 1 = smooth)",
+            f"  Note:        {note:<2}           (strength {note_strength:.2f})",
+            f"  Speed:       {bpm_str:>5} BPM",
+            "─" * 50,
+        ]
+        assert len(lines) == DASHBOARD_HEIGHT
+
+        out = sys.stdout
+        if not self.first:
+            out.write(f"\x1b[{DASHBOARD_HEIGHT}A")    # cursor up N lines
+        else:
+            self.first = False
+        for line in lines:
+            out.write("\r\x1b[2K" + line + "\n")      # clear line + redraw
+        out.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -424,7 +451,9 @@ def play_and_analyze(
     )
     if osc is not None:
         print(f"sending OSC to {osc.host}:{osc.port} as /audio/frame")
-    print(format_header())
+
+    dashboard = Dashboard(title="audio (sender)")
+    sent_seq = 0
 
     try:
         last_print_t = -1e9
@@ -442,9 +471,12 @@ def play_and_analyze(
             t = frames_played / rate
             if osc is not None:
                 osc.send(t, feats)
+                sent_seq = osc.seq
+            else:
+                sent_seq += 1
 
             if t - last_print_t >= 1.0 / PRINT_HZ:
-                print(format_dashboard(t, feats))
+                dashboard.render(t, feats, sent_seq)
                 last_print_t = t
 
             frames_played += CHUNK
@@ -511,7 +543,9 @@ def listen_and_analyze(
         print(f"sending OSC to {osc.host}:{osc.port} as /audio/frame")
     print("(press Ctrl-C to stop"
           + (" and play back" if playback else "") + ")")
-    print(format_header())
+
+    dashboard = Dashboard(title="mic (sender)")
+    sent_seq = 0
 
     recording: list[np.ndarray] = []
 
@@ -531,9 +565,12 @@ def listen_and_analyze(
             t = frames_read / rate
             if osc is not None:
                 osc.send(t, feats)
+                sent_seq = osc.seq
+            else:
+                sent_seq += 1
 
             if t - last_print_t >= 1.0 / PRINT_HZ:
-                print(format_dashboard(t, feats))
+                dashboard.render(t, feats, sent_seq)
                 last_print_t = t
             frames_read += CHUNK
     except KeyboardInterrupt:
