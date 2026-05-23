@@ -1,10 +1,11 @@
-"""Real-time audio playback + feature extraction.
+"""Real-time audio playback + feature extraction (music-brain edition).
 
 Plays a song (WAV / MP3 / FLAC / OGG / ...) through the default audio output
-while extracting and printing features synchronously with playback.
+while extracting a rich bundle of per-chunk features and a rolling tempo
+estimate, then prints a compact dashboard line in sync with playback.
 
-The output stream's blocking ``write()`` call is what paces the loop to
-real time, so feature lines scroll by in sync with what you're hearing.
+The output stream's blocking ``write()`` paces the loop to real time, so
+feature lines scroll past in lockstep with what you're hearing.
 
 Usage:
     uv run python main.py path/to/song.mp3
@@ -14,6 +15,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import sys
+from collections import deque
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
 
@@ -22,26 +24,48 @@ import numpy as np
 import pyaudio
 import soundfile as sf
 
+# --------------------------------------------------------------------------- #
+# Tunables                                                                    #
+# --------------------------------------------------------------------------- #
+
+CHUNK = 2048      # samples per block. 2048 @ 44.1 kHz = ~46 ms latency
+PRINT_HZ = 10     # dashboard refresh rate
+
+TEMPO_WINDOW_S = 4.0   # how much onset history to use for tempo estimation
+TEMPO_UPDATE_S = 2.0   # how often to recompute tempo
+
+# Standard 7-band EQ splits (Hz).
+BANDS = [
+    ("sub",    20,    60),
+    ("bass",   60,    250),
+    ("lo-mid", 250,   500),
+    ("mid",    500,   2000),
+    ("hi-mid", 2000,  4000),
+    ("treble", 4000,  6000),
+    ("air",    6000,  16000),
+]
+
+NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+BLOCKS = " ▁▂▃▄▅▆▇█"   # 9 levels for unicode bar rendering
+
+
+# --------------------------------------------------------------------------- #
+# Linux ALSA stderr noise muter + device listing                              #
+# --------------------------------------------------------------------------- #
 
 def silence_alsa_noise() -> None:
-    """Mute libasound's stderr probing on Linux.
-
-    PortAudio enumerates every PCM in your ALSA config at startup; the
-    'unable to open slave' / 'Unknown PCM' lines are libasound's own logging,
-    not failures from this script. We install a no-op error handler.
-    """
+    """Mute libasound's stderr probing on Linux."""
     try:
         asound = ctypes.cdll.LoadLibrary("libasound.so.2")
     except OSError:
-        return  # not Linux or libasound missing — nothing to silence
-
+        return
     ERROR_HANDLER = ctypes.CFUNCTYPE(
         None, ctypes.c_char_p, ctypes.c_int,
         ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
     )
     handler = ERROR_HANDLER(lambda *_: None)
     asound.snd_lib_error_set_handler(handler)
-    silence_alsa_noise._handler = handler  # keep ref alive
+    silence_alsa_noise._handler = handler
 
 
 def list_devices() -> None:
@@ -65,28 +89,16 @@ def list_devices() -> None:
     finally:
         p.terminate()
 
-CHUNK = 2048      # samples per block. 2048 @ 44.1 kHz = ~46 ms latency
-PRINT_HZ = 10     # feature-print rate (Hz)
-
-NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
 
 # --------------------------------------------------------------------------- #
-# File loading: soundfile streams from disk; librosa is a fallback that       #
-# decodes the whole file into memory (handles codecs libsndfile can't).       #
+# File loading (soundfile streaming + librosa in-memory fallback)             #
 # --------------------------------------------------------------------------- #
 
 def load_streamer(path: Path) -> Tuple[int, int, Iterator[np.ndarray]]:
-    """Open ``path`` and return ``(rate, channels, block_iterator)``.
-
-    Each yielded block is a ``float32`` array shaped ``(CHUNK, channels)``
-    (the final block may be shorter; the caller pads it).
-    """
+    """Open ``path`` and return ``(rate, channels, block_iterator)``."""
     try:
         song = sf.SoundFile(str(path))
     except RuntimeError as e:
-        # libsndfile couldn't decode it (e.g. exotic MP3). Fall back to
-        # librosa.load, which uses audioread/ffmpeg under the hood.
         print(
             f"[info] soundfile can't open this file ({e}); "
             f"falling back to a full librosa decode.",
@@ -95,7 +107,7 @@ def load_streamer(path: Path) -> Tuple[int, int, Iterator[np.ndarray]]:
         y, rate = librosa.load(str(path), sr=None, mono=False)
         if y.ndim == 1:
             y = y[np.newaxis, :]
-        y = y.T.astype(np.float32)          # (samples, channels)
+        y = y.T.astype(np.float32)
         channels = y.shape[1]
 
         def blocks_from_memory() -> Iterator[np.ndarray]:
@@ -109,7 +121,7 @@ def load_streamer(path: Path) -> Tuple[int, int, Iterator[np.ndarray]]:
     def blocks_from_disk() -> Iterator[np.ndarray]:
         try:
             yield from song.blocks(
-                blocksize=CHUNK, dtype="float32", always_2d=True
+                blocksize=CHUNK, dtype="float32", always_2d=True,
             )
         finally:
             song.close()
@@ -118,52 +130,182 @@ def load_streamer(path: Path) -> Tuple[int, int, Iterator[np.ndarray]]:
 
 
 # --------------------------------------------------------------------------- #
-# Feature extraction                                                          #
+# Rolling-peak normalizer (for visual scaling of bars / onset strength)       #
 # --------------------------------------------------------------------------- #
 
-def extract_features(mono: np.ndarray, rate: int) -> dict:
-    """Compute time- and frequency-domain features for one mono chunk."""
-    n_fft = len(mono)
+class RollingPeak:
+    """Per-element running peak with exponential decay.
 
-    rms = float(np.sqrt(np.mean(mono ** 2) + 1e-12))
-    peak = float(np.max(np.abs(mono)))
-    zcr = float(np.mean(np.abs(np.diff(np.signbit(mono)))))
+    Lets quiet sections grow visible bars after a while, while loud
+    sections still hit full scale. ``decay`` close to 1 = slow adaptation.
+    """
 
-    # One windowed FFT, reused for every spectral feature.
-    win = np.hanning(n_fft).astype(np.float32)
-    mag = np.abs(np.fft.rfft(mono * win)).astype(np.float32)
-    S_mag = mag[:, np.newaxis]              # librosa wants shape (freq, frame)
-    S_pow = S_mag ** 2
+    def __init__(self, n: int, decay: float = 0.995, floor: float = 1e-6):
+        self.peaks = np.full(n, floor, dtype=np.float32)
+        self.decay = decay
+        self.floor = floor
 
-    centroid  = float(librosa.feature.spectral_centroid (S=S_mag, sr=rate)[0, 0])
-    rolloff   = float(librosa.feature.spectral_rolloff  (S=S_mag, sr=rate)[0, 0])
-    bandwidth = float(librosa.feature.spectral_bandwidth(S=S_mag, sr=rate)[0, 0])
-    flatness  = float(librosa.feature.spectral_flatness (S=S_mag)        [0, 0])
-
-    mel = librosa.feature.melspectrogram(S=S_pow, sr=rate, n_mels=64)
-    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel), n_mfcc=13)[:, 0]
-
-    chroma = librosa.feature.chroma_stft(S=S_pow, sr=rate)[:, 0]
-
-    return {
-        "rms": rms, "peak": peak, "zcr": zcr,
-        "centroid": centroid, "rolloff": rolloff,
-        "bandwidth": bandwidth, "flatness": flatness,
-        "mfcc": mfcc, "chroma": chroma,
-    }
+    def normalize(self, x: np.ndarray) -> np.ndarray:
+        self.peaks = np.maximum(self.peaks * self.decay, x.astype(np.float32))
+        return np.clip(x / np.maximum(self.peaks, self.floor), 0.0, 1.0)
 
 
-def format_line(t: float, f: dict) -> str:
-    note = NOTES[int(np.argmax(f["chroma"]))]
+# --------------------------------------------------------------------------- #
+# Stateful feature extractor                                                  #
+# --------------------------------------------------------------------------- #
+
+# Try to find the right tempo function across librosa versions.
+try:
+    _tempo_fn = librosa.feature.tempo            # librosa >= 0.10
+except AttributeError:                           # pragma: no cover
+    _tempo_fn = librosa.beat.tempo               # older librosa
+
+
+class FeatureExtractor:
+    """Streaming feature extractor.
+
+    Call the instance with each mono chunk (``float32``, length ``CHUNK``)
+    to get a dict of features. Keeps state for spectral flux (→ onset
+    strength) and for periodic tempo estimation.
+    """
+
+    def __init__(self, rate: int, chunk: int = CHUNK,
+                 tempo_window_s: float = TEMPO_WINDOW_S,
+                 tempo_update_s: float = TEMPO_UPDATE_S):
+        self.rate = rate
+        self.chunk = chunk
+        self.win = np.hanning(chunk).astype(np.float32)
+        self.freqs = np.fft.rfftfreq(chunk, 1.0 / rate)
+        self.band_masks = [
+            (self.freqs >= lo) & (self.freqs < hi) for _, lo, hi in BANDS
+        ]
+        self.band_norm = RollingPeak(len(BANDS), decay=0.995)
+        self.onset_norm = RollingPeak(1, decay=0.99)
+
+        # Spectral flux state
+        self.prev_mag: Optional[np.ndarray] = None
+
+        # Onset envelope history for tempo estimation
+        n_frames = int(np.ceil(tempo_window_s * rate / chunk))
+        self.onset_history: deque = deque(maxlen=n_frames)
+        self.tempo_update_chunks = int(np.ceil(tempo_update_s * rate / chunk))
+        self.chunks_since_tempo = 0
+        self.tempo_bpm: Optional[float] = None
+
+    def __call__(self, mono: np.ndarray) -> dict:
+        rate = self.rate
+
+        # ---- time domain ---------------------------------------------------
+        rms = float(np.sqrt(np.mean(mono ** 2) + 1e-12))
+        peak = float(np.max(np.abs(mono)))
+        crest = peak / (rms + 1e-12)
+        zcr = float(np.mean(np.abs(np.diff(np.signbit(mono)))))
+
+        # ---- one windowed FFT, reused everywhere --------------------------
+        mag = np.abs(np.fft.rfft(mono * self.win)).astype(np.float32)
+        S_mag = mag[:, None]
+        S_pow = S_mag ** 2
+
+        # ---- spectral shape ------------------------------------------------
+        centroid  = float(librosa.feature.spectral_centroid (S=S_mag, sr=rate)[0, 0])
+        rolloff   = float(librosa.feature.spectral_rolloff  (S=S_mag, sr=rate)[0, 0])
+        bandwidth = float(librosa.feature.spectral_bandwidth(S=S_mag, sr=rate)[0, 0])
+        flatness  = float(librosa.feature.spectral_flatness (S=S_mag)        [0, 0])
+
+        # ---- band energies -------------------------------------------------
+        bands = np.array(
+            [float(np.sum(mag[m] ** 2)) for m in self.band_masks],
+            dtype=np.float32,
+        )
+        bands_norm = self.band_norm.normalize(bands)
+
+        # ---- chroma & MFCC -------------------------------------------------
+        chroma = librosa.feature.chroma_stft(S=S_pow, sr=rate)[:, 0]
+        mel = librosa.feature.melspectrogram(S=S_pow, sr=rate, n_mels=64)
+        # MFCC 1..12 — drop coef 0 (overall log-energy ≈ rms).
+        mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel), n_mfcc=13)[1:, 0]
+
+        # ---- onset strength (half-wave-rectified spectral flux) -----------
+        if self.prev_mag is None or self.prev_mag.shape != mag.shape:
+            onset_raw = 0.0
+        else:
+            diff = np.maximum(mag - self.prev_mag, 0.0)
+            onset_raw = float(np.sqrt(np.sum(diff ** 2)))
+        self.prev_mag = mag
+
+        onset_norm = float(
+            self.onset_norm.normalize(np.array([onset_raw], dtype=np.float32))[0]
+        )
+        self.onset_history.append(onset_raw)
+
+        # ---- tempo (rolling buffer, infrequent) ---------------------------
+        self.chunks_since_tempo += 1
+        if (self.chunks_since_tempo >= self.tempo_update_chunks
+                and len(self.onset_history) == self.onset_history.maxlen):
+            env = np.asarray(self.onset_history, dtype=np.float32)
+            if env.max() > 1e-6:
+                try:
+                    bpm = _tempo_fn(
+                        onset_envelope=env, sr=rate, hop_length=self.chunk,
+                    )
+                    self.tempo_bpm = float(np.atleast_1d(bpm)[0])
+                except Exception:
+                    pass
+            self.chunks_since_tempo = 0
+
+        return {
+            "rms": rms, "peak": peak, "crest": crest, "zcr": zcr,
+            "centroid": centroid, "rolloff": rolloff,
+            "bandwidth": bandwidth, "flatness": flatness,
+            "bands": bands,
+            "bands_norm": bands_norm,
+            "chroma": chroma,
+            "mfcc": mfcc,
+            "onset": onset_raw,
+            "onset_norm": onset_norm,
+            "tempo": self.tempo_bpm,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Compact dashboard formatter                                                 #
+# --------------------------------------------------------------------------- #
+
+def _bars(values: np.ndarray) -> str:
+    """Render an array of 0..1 floats as a unicode block-bar string."""
+    n = len(BLOCKS) - 1
+    return "".join(BLOCKS[min(n, max(0, int(round(v * n))))] for v in values)
+
+
+def format_dashboard(t: float, f: dict) -> str:
+    band_bars = _bars(f["bands_norm"])
+    note_idx = int(np.argmax(f["chroma"]))
+    note = NOTES[note_idx]
+    note_strength = float(f["chroma"][note_idx])
+
+    bpm = f"{f['tempo']:5.1f}" if f["tempo"] is not None else "  ---"
+    onset_bar = BLOCKS[min(len(BLOCKS) - 1, int(f["onset_norm"] * (len(BLOCKS) - 1)))]
+
     return (
-        f"t={t:6.2f}s  "
-        f"rms={f['rms']:.3f}  "
-        f"centroid={f['centroid']:6.0f}Hz  "
-        f"rolloff={f['rolloff']:6.0f}Hz  "
-        f"flatness={f['flatness']:.3f}  "
-        f"note={note:>2}  "
-        f"mfcc[0..3]=[{f['mfcc'][0]:+.1f}, {f['mfcc'][1]:+.1f}, "
-        f"{f['mfcc'][2]:+.1f}, {f['mfcc'][3]:+.1f}]"
+        f"t={t:6.2f}s │ "
+        f"[{band_bars}] │ "
+        f"rms={f['rms']:.3f} pk={f['peak']:.2f} crest={f['crest']:4.1f} "
+        f"zcr={f['zcr']:.2f} │ "
+        f"cen={f['centroid']:5.0f} rol={f['rolloff']:5.0f} "
+        f"bw={f['bandwidth']:4.0f} flat={f['flatness']:.2f} │ "
+        f"note={note:>2}({note_strength:.2f}) │ "
+        f"mfcc1..3=[{f['mfcc'][0]:+5.1f},{f['mfcc'][1]:+5.1f},{f['mfcc'][2]:+5.1f}] │ "
+        f"onset {onset_bar} │ "
+        f"{bpm} BPM"
+    )
+
+
+def format_header() -> str:
+    band_labels = " ".join(b[0][:3] for b in BANDS)
+    return (
+        f"    time   │ bands [{band_labels}] │ amplitude            │ "
+        f"timbre                          │ note      │ "
+        f"mfcc 1..3              │ onset │ tempo"
     )
 
 
@@ -174,7 +316,6 @@ def format_line(t: float, f: dict) -> str:
 def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
     rate, channels, blocks = load_streamer(path)
 
-    # Open the device first — this is where the Pulse/ALSA handshake happens.
     p = pyaudio.PyAudio()
     if device_index is not None:
         info = p.get_device_info_by_index(device_index)
@@ -188,38 +329,46 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
         frames_per_buffer=CHUNK,
     )
 
-    # Pre-warm librosa: the first call to mfcc/melspectrogram/chroma triggers
-    # numba JIT compilation (1-3 s). Doing it on a silent buffer here means
-    # the first real audio chunk plays back without a hitch.
+    extractor = FeatureExtractor(rate=rate, chunk=CHUNK)
+
+    # Warm up numba kernels on quiet noise (zeros trigger a chroma warning).
     print("warming up feature extractors...", end="", flush=True)
-    extract_features(np.zeros(CHUNK, dtype=np.float32), rate)
+    warmup = (np.random.randn(CHUNK).astype(np.float32) * 1e-4)
+    for _ in range(3):
+        extractor(warmup)
+    extractor.prev_mag = None
+    extractor.onset_history.clear()
+    extractor.tempo_bpm = None
+    extractor.chunks_since_tempo = 0
     print(" done.")
 
     print(
         f"playing: {path.name} | {rate} Hz | {channels}ch | "
         f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
     )
+    print(format_header())
 
     try:
         last_print_t = -1e9
         frames_played = 0
         for block in blocks:
-            # Pad final short block so feature extraction sees a fixed size.
             if len(block) < CHUNK:
                 pad = np.zeros((CHUNK - len(block), channels), dtype=np.float32)
                 block = np.vstack([block, pad])
 
-            # 1. Playback — blocking write paces the loop to real time.
+            # Playback — blocking write paces the loop to real time.
             stream.write(np.ascontiguousarray(block).tobytes())
 
-            # 2. Downmix to mono for analysis only (playback stays stereo).
-            mono = block.mean(axis=1) if channels > 1 else block[:, 0]
+            # Downmix to mono for analysis (playback stays stereo).
+            mono = (block.mean(axis=1) if channels > 1 else block[:, 0]).astype(np.float32)
 
-            # 3. Throttled feature extraction + print.
+            # Run extractor every chunk (needed for onset history → tempo).
+            feats = extractor(mono)
+
+            # Throttled dashboard print.
             t = frames_played / rate
             if t - last_print_t >= 1.0 / PRINT_HZ:
-                feats = extract_features(mono.astype(np.float32), rate)
-                print(format_line(t, feats))
+                print(format_dashboard(t, feats))
                 last_print_t = t
 
             frames_played += CHUNK
