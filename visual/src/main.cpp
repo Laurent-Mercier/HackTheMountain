@@ -13,9 +13,10 @@ struct Uniforms {
     float aspect;
     float resolution[2];
     float mouse[2];
-    float _pad[2];  // pad to 32 bytes (multiple of 16)
+    float _pad[2];
 };
-static_assert(sizeof(Uniforms) == 32);
+
+static_assert(sizeof(Uniforms) % 16 == 0);
 
 static std::vector<Uint8> load_file(const std::string& path) {
     SDL_IOStream* io = SDL_IOFromFile(path.c_str(), "rb");

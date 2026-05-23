@@ -1,4 +1,0 @@
-/home/jack/Programming/HackTheMountain/visual/build/CMakeFiles/shaders.dir
-/home/jack/Programming/HackTheMountain/visual/build/CMakeFiles/visual.dir
-/home/jack/Programming/HackTheMountain/visual/build/CMakeFiles/edit_cache.dir
-/home/jack/Programming/HackTheMountain/visual/build/CMakeFiles/rebuild_cache.dir

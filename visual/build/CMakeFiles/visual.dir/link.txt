@@ -1,1 +1,0 @@
-/usr/sbin/c++ -Wl,--dependency-file=CMakeFiles/visual.dir/link.d CMakeFiles/visual.dir/src/main.cpp.o -o visual  /usr/lib/libSDL3.so.0.4.8
