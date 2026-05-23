@@ -384,14 +384,20 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
 
 def listen_and_analyze(
     input_device: Optional[int] = None,
+    output_device: Optional[int] = None,
     rate: int = 44100,
+    playback: bool = True,
 ) -> None:
-    """Mic mode: capture from microphone → feature dashboard (no playback).
+    """Mic mode: capture from microphone → feature dashboard.
 
-    No audio is written back to the speakers, so this is safe to run with
-    laptop speakers on (no feedback loop). ``stream.read`` blocks until a
-    full CHUNK has been captured, which paces the loop to real time exactly
-    the same way ``stream.write`` does in file mode.
+    No audio is written back to the speakers *during* capture, so this is
+    safe to run with laptop speakers on (no feedback loop). ``stream.read``
+    blocks until a full CHUNK has been captured, which paces the loop to
+    real time exactly the same way ``stream.write`` does in file mode.
+
+    On Ctrl-C, if ``playback=True``, the captured audio is played back
+    through ``output_device`` before the function returns. A second Ctrl-C
+    during playback skips it.
     """
     p = pyaudio.PyAudio()
     try:
@@ -407,7 +413,7 @@ def listen_and_analyze(
         return
 
     try:
-        stream = p.open(
+        in_stream = p.open(
             format=pyaudio.paFloat32,
             channels=1,
             rate=rate,
@@ -428,8 +434,11 @@ def listen_and_analyze(
         f"listening: mic | {rate} Hz | mono | "
         f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
     )
-    print("(press Ctrl-C to stop)")
+    print("(press Ctrl-C to stop"
+          + (" and play back" if playback else "") + ")")
     print(format_header())
+
+    recording: list[np.ndarray] = []
 
     try:
         last_print_t = -1e9
@@ -437,8 +446,11 @@ def listen_and_analyze(
         while True:
             # exception_on_overflow=False → drop samples instead of raising
             # if our processing falls behind the audio thread.
-            raw = stream.read(CHUNK, exception_on_overflow=False)
+            raw = in_stream.read(CHUNK, exception_on_overflow=False)
             mono = np.frombuffer(raw, dtype=np.float32).copy()
+            if playback:
+                recording.append(mono)
+
             feats = extractor(mono)
 
             t = frames_read / rate
@@ -446,13 +458,77 @@ def listen_and_analyze(
                 print(format_dashboard(t, feats))
                 last_print_t = t
             frames_read += CHUNK
+    except KeyboardInterrupt:
+        captured_s = frames_read / rate
+        print(f"\nstopped capture after {captured_s:.1f}s.")
     finally:
         try:
-            stream.stop_stream()
-            stream.close()
+            in_stream.stop_stream()
+            in_stream.close()
         except Exception:
             pass
-        p.terminate()
+
+    if playback and recording:
+        _playback_recording(p, recording, rate, output_device)
+
+    p.terminate()
+
+
+def _playback_recording(
+    p: pyaudio.PyAudio,
+    recording: list[np.ndarray],
+    rate: int,
+    output_device: Optional[int],
+) -> None:
+    """Concatenate the captured mono chunks and play them back once."""
+    audio = np.concatenate(recording)
+    duration = len(audio) / rate
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+
+    if peak < 1e-4:
+        print("(captured audio is essentially silent — skipping playback)")
+        return
+
+    if output_device is not None:
+        try:
+            info = p.get_device_info_by_index(output_device)
+            print(f"playing back {duration:.1f}s on [{output_device}] "
+                  f"{info['name']} (peak={peak:.3f}, Ctrl-C to skip)")
+        except OSError:
+            output_device = None
+
+    if output_device is None:
+        print(f"playing back {duration:.1f}s on default output "
+              f"(peak={peak:.3f}, Ctrl-C to skip)")
+
+    try:
+        out_stream = p.open(
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=rate,
+            output=True,
+            output_device_index=output_device,
+            frames_per_buffer=CHUNK,
+        )
+    except OSError as e:
+        print(f"error: failed to open output stream: {e}", file=sys.stderr)
+        return
+
+    try:
+        for i in range(0, len(audio), CHUNK):
+            block = audio[i:i + CHUNK]
+            if len(block) < CHUNK:
+                pad = np.zeros(CHUNK - len(block), dtype=np.float32)
+                block = np.concatenate([block, pad])
+            out_stream.write(np.ascontiguousarray(block).tobytes())
+    except KeyboardInterrupt:
+        print("\nplayback skipped.")
+    finally:
+        try:
+            out_stream.stop_stream()
+            out_stream.close()
+        except Exception:
+            pass
 
 
 def main() -> int:
@@ -481,6 +557,10 @@ def main() -> int:
         help="sample rate to request from the mic (default 44100)",
     )
     parser.add_argument(
+        "--no-playback", action="store_true",
+        help="don't replay the recording when --mic is stopped with Ctrl-C",
+    )
+    parser.add_argument(
         "--list-devices", action="store_true",
         help="list audio devices and exit",
     )
@@ -502,7 +582,10 @@ def main() -> int:
             print("[info] --mic given; ignoring song path", file=sys.stderr)
         try:
             listen_and_analyze(
-                input_device=args.input_device, rate=args.rate,
+                input_device=args.input_device,
+                output_device=args.device,
+                rate=args.rate,
+                playback=not args.no_playback,
             )
         except KeyboardInterrupt:
             print("\ninterrupted.")
