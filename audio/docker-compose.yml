@@ -1,0 +1,75 @@
+# Portable compose: bridge network + OSC via service name `receiver`.
+# Linux host audio: also pass -f docker-compose.linux.yml (play.sh does this).
+#
+#   ./play.sh music "song.mp3"
+
+networks:
+  htnet:
+    name: htnet
+
+x-host-gateway: &host-gateway
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-producer-env: &producer-env
+  OSC_HOST: ${OSC_HOST:-receiver}
+  OSC_PORT: ${OSC_PORT:-9000}
+  PULSE_SERVER: ${PULSE_SERVER:-tcp:host.docker.internal:4713}
+  # Pin to the host's current default sink/source (play.sh sets on Linux).
+  PULSE_SINK: ${PULSE_SINK:-}
+  PULSE_SOURCE: ${PULSE_SOURCE:-}
+  # Prefer Pulse PCM for ALSA "default" inside the container.
+  PULSE_RUNTIME_PATH: /run/pulse
+  PA_ALSA_PLUG: "1"
+  # Extra CLI flags for mic/midi (e.g. --monitor). Set by play.sh.
+  SENDER_EXTRA_ARGS: ${SENDER_EXTRA_ARGS:-}
+
+x-producer-base: &producer-base
+  image: ht-audio:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  networks: [htnet]
+  <<: *host-gateway
+  devices:
+    - /dev/snd:/dev/snd
+  group_add:
+    - audio
+  environment: *producer-env
+
+services:
+  receiver:
+    image: ht-receiver:latest
+    build:
+      context: ./receiver
+      dockerfile: Dockerfile
+    networks: [htnet]
+    <<: *host-gateway
+    ports:
+      - "${OSC_PORT:-9000}:9000/udp"
+    command: ["9000"]
+    tty: true
+    stdin_open: true
+
+  audio:
+    <<: *producer-base
+    profiles: ["build-only"]
+
+  music:
+    <<: *producer-base
+    volumes:
+      - ./:/music:ro
+    entrypoint: ["/usr/local/bin/audio", "music"]
+    command: ["${SONG:-Darude - Sandstorm.mp3}"]
+
+  mic:
+    <<: *producer-base
+    entrypoint: ["/usr/local/bin/audio", "mic"]
+
+  midi:
+    <<: *producer-base
+    entrypoint: ["/usr/local/bin/audio", "midi"]
+
+  list-devices:
+    <<: *producer-base
+    entrypoint: ["/usr/local/bin/audio", "list-devices"]

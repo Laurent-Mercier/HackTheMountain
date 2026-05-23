@@ -1,0 +1,20 @@
+# Linux-only: bind-mount the host PipeWire/Pulse socket into producers.
+# play.sh adds `-f docker-compose.linux.yml` automatically on Linux.
+
+services:
+  music:
+    volumes:
+      - ./:/music:ro
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse:/run/pulse
+
+  mic:
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse:/run/pulse
+
+  midi:
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse:/run/pulse
+
+  list-devices:
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/pulse:/run/pulse
