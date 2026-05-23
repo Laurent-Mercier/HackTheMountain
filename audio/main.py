@@ -313,7 +313,26 @@ def format_header() -> str:
 # Main pipeline                                                               #
 # --------------------------------------------------------------------------- #
 
+def warmup_extractor(extractor: "FeatureExtractor") -> None:
+    """Run a few silent chunks through the extractor to trigger numba JIT.
+
+    Uses low-level noise (not zeros) so chroma_stft doesn't warn about an
+    empty frequency set. Stateful buffers are reset afterwards so the first
+    real chunk starts clean.
+    """
+    print("warming up feature extractors...", end="", flush=True)
+    warmup = (np.random.randn(extractor.chunk).astype(np.float32) * 1e-4)
+    for _ in range(3):
+        extractor(warmup)
+    extractor.prev_mag = None
+    extractor.onset_history.clear()
+    extractor.tempo_bpm = None
+    extractor.chunks_since_tempo = 0
+    print(" done.")
+
+
 def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
+    """File mode: stream from disk → speakers + feature dashboard."""
     rate, channels, blocks = load_streamer(path)
 
     p = pyaudio.PyAudio()
@@ -330,17 +349,7 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
     )
 
     extractor = FeatureExtractor(rate=rate, chunk=CHUNK)
-
-    # Warm up numba kernels on quiet noise (zeros trigger a chroma warning).
-    print("warming up feature extractors...", end="", flush=True)
-    warmup = (np.random.randn(CHUNK).astype(np.float32) * 1e-4)
-    for _ in range(3):
-        extractor(warmup)
-    extractor.prev_mag = None
-    extractor.onset_history.clear()
-    extractor.tempo_bpm = None
-    extractor.chunks_since_tempo = 0
-    print(" done.")
+    warmup_extractor(extractor)
 
     print(
         f"playing: {path.name} | {rate} Hz | {channels}ch | "
@@ -356,16 +365,11 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
                 pad = np.zeros((CHUNK - len(block), channels), dtype=np.float32)
                 block = np.vstack([block, pad])
 
-            # Playback — blocking write paces the loop to real time.
             stream.write(np.ascontiguousarray(block).tobytes())
 
-            # Downmix to mono for analysis (playback stays stereo).
             mono = (block.mean(axis=1) if channels > 1 else block[:, 0]).astype(np.float32)
-
-            # Run extractor every chunk (needed for onset history → tempo).
             feats = extractor(mono)
 
-            # Throttled dashboard print.
             t = frames_played / rate
             if t - last_print_t >= 1.0 / PRINT_HZ:
                 print(format_dashboard(t, feats))
@@ -378,21 +382,107 @@ def play_and_analyze(path: Path, device_index: Optional[int] = None) -> None:
         p.terminate()
 
 
+def listen_and_analyze(
+    input_device: Optional[int] = None,
+    rate: int = 44100,
+) -> None:
+    """Mic mode: capture from microphone → feature dashboard (no playback).
+
+    No audio is written back to the speakers, so this is safe to run with
+    laptop speakers on (no feedback loop). ``stream.read`` blocks until a
+    full CHUNK has been captured, which paces the loop to real time exactly
+    the same way ``stream.write`` does in file mode.
+    """
+    p = pyaudio.PyAudio()
+    try:
+        if input_device is not None:
+            info = p.get_device_info_by_index(input_device)
+        else:
+            info = p.get_default_input_device_info()
+            input_device = int(info["index"])
+        print(f"using input device [{input_device}] {info['name']}")
+    except OSError:
+        print("error: no input device available", file=sys.stderr)
+        p.terminate()
+        return
+
+    try:
+        stream = p.open(
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=rate,
+            input=True,
+            input_device_index=input_device,
+            frames_per_buffer=CHUNK,
+        )
+    except OSError as e:
+        print(f"error: failed to open input stream at {rate} Hz: {e}",
+              file=sys.stderr)
+        p.terminate()
+        return
+
+    extractor = FeatureExtractor(rate=rate, chunk=CHUNK)
+    warmup_extractor(extractor)
+
+    print(
+        f"listening: mic | {rate} Hz | mono | "
+        f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
+    )
+    print("(press Ctrl-C to stop)")
+    print(format_header())
+
+    try:
+        last_print_t = -1e9
+        frames_read = 0
+        while True:
+            # exception_on_overflow=False → drop samples instead of raising
+            # if our processing falls behind the audio thread.
+            raw = stream.read(CHUNK, exception_on_overflow=False)
+            mono = np.frombuffer(raw, dtype=np.float32).copy()
+            feats = extractor(mono)
+
+            t = frames_read / rate
+            if t - last_print_t >= 1.0 / PRINT_HZ:
+                print(format_dashboard(t, feats))
+                last_print_t = t
+            frames_read += CHUNK
+    finally:
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:
+            pass
+        p.terminate()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Play an audio file while printing real-time features."
+        description="Play an audio file (or capture from mic) while printing "
+                    "real-time features."
     )
     parser.add_argument(
         "song", type=Path, nargs="?",
-        help="audio file (wav/mp3/flac/ogg/...)",
+        help="audio file (wav/mp3/flac/ogg/...); omit when using --mic",
     )
     parser.add_argument(
-        "--list-devices", action="store_true",
-        help="list audio output devices and exit",
+        "--mic", action="store_true",
+        help="capture from the microphone instead of playing a file",
+    )
+    parser.add_argument(
+        "--input-device", type=int, default=None,
+        help="input device index (with --mic; see --list-devices)",
     )
     parser.add_argument(
         "--device", type=int, default=None,
-        help="output device index (see --list-devices)",
+        help="output device index for file playback (see --list-devices)",
+    )
+    parser.add_argument(
+        "--rate", type=int, default=44100,
+        help="sample rate to request from the mic (default 44100)",
+    )
+    parser.add_argument(
+        "--list-devices", action="store_true",
+        help="list audio devices and exit",
     )
     parser.add_argument(
         "--alsa-noise", action="store_true",
@@ -407,8 +497,19 @@ def main() -> int:
         list_devices()
         return 0
 
+    if args.mic:
+        if args.song is not None:
+            print("[info] --mic given; ignoring song path", file=sys.stderr)
+        try:
+            listen_and_analyze(
+                input_device=args.input_device, rate=args.rate,
+            )
+        except KeyboardInterrupt:
+            print("\ninterrupted.")
+        return 0
+
     if args.song is None:
-        parser.error("song path is required (or pass --list-devices)")
+        parser.error("a song path is required (or use --mic, or --list-devices)")
     if not args.song.is_file():
         print(f"error: file not found: {args.song}", file=sys.stderr)
         return 1
