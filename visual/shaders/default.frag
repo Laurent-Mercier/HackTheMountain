@@ -8,6 +8,24 @@ layout(set = 3, binding = 0) uniform Uniforms {
     vec2  mouse;
 };
 
+// Fragment uniform slot 1 → SPIR-V set=3, binding=1
+// Mirrors AudioUniforms in main.cpp (std140).
+layout(set = 3, binding = 1) uniform AudioUniforms {
+    float volume_db;     // [-80, 0]  dBFS
+    float bass;          // [0, 1]    20–250 Hz relative energy
+    float mid;           // [0, 1]    250–4k Hz
+    float treble;        // [0, 1]    4k–16k Hz
+    float bpm;           // [-1, 320] beats/min; -1 = unknown
+    float smoothness;    // [0, 1]    0 = percussive, 1 = sine-like
+    float centroid_hz;   // [0, 22050] raw spectral centroid
+    float centroid_n;    // [0, 1]    log-mapped perceptual brightness
+    float note;          // [0, 11]   dominant pitch class (C=0)
+    float note_strength; // [0, 1]    chroma energy of dominant note
+    float _pad[2];
+    vec4  chroma[3];     // 12 pitch-class energies packed as 3×vec4
+                         // chroma[0].xyzw = C C# D D#, [1] = E F F# G, [2] = G# A A# B
+} audio;
+
 layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
@@ -25,7 +43,7 @@ float ray_march(vec3 ro, vec3 rd) {
         float distance = SDF_sphere(ro + rd * traveled, 1.0);
         if (distance < MINIMUM_HIT_DISTANCE) return traveled;
         if (traveled > MAXIMUM_TRACE_DISTANCE) break;
-        traveled += distnace;
+        traveled += distance;
     }
     return MAXIMUM_TRACE_DISTANCE;
 }
