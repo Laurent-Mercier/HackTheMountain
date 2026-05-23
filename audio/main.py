@@ -676,8 +676,9 @@ def main() -> int:
         help="don't replay the recording when --mic is stopped with Ctrl-C",
     )
     parser.add_argument(
-        "--osc", action="store_true",
-        help="broadcast feature snapshots as OSC /audio/frame over UDP",
+        "--no-osc", action="store_true",
+        help="disable OSC broadcasting (default: send /audio/frame to "
+             "127.0.0.1:9000)",
     )
     parser.add_argument(
         "--osc-host", type=str, default="127.0.0.1",
@@ -704,7 +705,7 @@ def main() -> int:
         list_devices()
         return 0
 
-    osc = OscSender(args.osc_host, args.osc_port) if args.osc else None
+    osc = None if args.no_osc else OscSender(args.osc_host, args.osc_port)
 
     if args.mic:
         if args.song is not None:
