@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "librosa>=0.10.2",
     "numpy>=2.4.6",
     "pyaudio>=0.2.14",
+    "soundfile>=0.12.1",
 ]
