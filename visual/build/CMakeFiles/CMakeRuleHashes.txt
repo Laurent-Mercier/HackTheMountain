@@ -1,0 +1,4 @@
+# Hashes of file build rules.
+eb3407eab328191ae8d07d958533d759 CMakeFiles/shaders
+fcbad1a4cf0f919e646b4f494776552d shaders/default.frag.spv
+7fba37f7bec557a1a46a245e49ec6401 shaders/fullscreen.vert.spv

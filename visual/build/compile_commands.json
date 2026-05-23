@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/home/max/Codecading/HackTheMountain/visual/build",
+  "command": "/usr/bin/c++   -std=gnu++23 -Wall -Wextra -Wpedantic -o CMakeFiles/visual.dir/src/main.cpp.o -c /home/max/Codecading/HackTheMountain/visual/src/main.cpp",
+  "file": "/home/max/Codecading/HackTheMountain/visual/src/main.cpp",
+  "output": "CMakeFiles/visual.dir/src/main.cpp.o"
+}
+]

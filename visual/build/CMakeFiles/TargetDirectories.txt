@@ -1,0 +1,4 @@
+/home/max/Codecading/HackTheMountain/visual/build/CMakeFiles/shaders.dir
+/home/max/Codecading/HackTheMountain/visual/build/CMakeFiles/visual.dir
+/home/max/Codecading/HackTheMountain/visual/build/CMakeFiles/edit_cache.dir
+/home/max/Codecading/HackTheMountain/visual/build/CMakeFiles/rebuild_cache.dir
