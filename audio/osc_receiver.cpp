@@ -26,7 +26,9 @@
 //     [7]   smoothness    float  0..1   1 = sine-like, 0 = transient
 //     [8]   centroid_hz   float  raw Hz
 //     [9]   centroid_n    float  0..1   log-mapped (50..10k Hz)
-//     [10]  note          int    dominant pitch class 0..11 (C=0)
+//     [10]  note          int    MIDI note number (C-1=0, A4=69, C8=108)
+//                                   pitch class = note % 12   (0=C..11=B)
+//                                   octave      = note / 12 - 1
 //     [11..22] chroma[12] float  pitch-class energies, each 0..1
 
 #include <arpa/inet.h>
@@ -54,8 +56,8 @@ constexpr int    REFRESH_PERIOD_MS = 100;             // 10 Hz dashboard
 constexpr int    DASHBOARD_LINES   = 9;
 
 constexpr const char* NOTES[12] = {
-    "C ", "C#", "D ", "D#", "E ", "F ", "F#",
-    "G ", "G#", "A ", "A#", "B ",
+    "C", "C#", "D", "D#", "E", "F", "F#",
+    "G", "G#", "A", "A#", "B",
 };
 
 constexpr const char* BAND_NAMES[3] = { "bass", "mid", "treble" };
@@ -176,16 +178,21 @@ public:
         const int dom = (f.mid   > f.bass   ? 1 : 0);
         const int dom_band = (f.treble > (dom == 0 ? f.bass : f.mid)) ? 2 : dom;
 
-        const char* note     = NOTES[f.note];
-        const float note_str = f.chroma[f.note];
+        const int   pc       = ((f.note % 12) + 12) % 12;
+        int         octave   = f.note / 12 - 1;
+        if (octave < -1) octave = -1;
+        if (octave >  9) octave =  9;
+        const float note_str = f.chroma[pc];
 
         char bpm_buf[16];
         if (f.bpm > 0) std::snprintf(bpm_buf, sizeof bpm_buf, "%.1f", f.bpm);
         else           std::strcpy(bpm_buf, "---");
 
-        char note_buf[4];
-        if (note_str > 0.20f) std::snprintf(note_buf, sizeof note_buf, "%s", note);
-        else                  std::strcpy(note_buf, "--");
+        char note_buf[8];
+        if (note_str > 0.20f)
+            std::snprintf(note_buf, sizeof note_buf, "%s%d", NOTES[pc], octave);
+        else
+            std::strcpy(note_buf, "--");
 
         if (!first_) std::printf("\x1b[%dA", DASHBOARD_LINES);
         else         first_ = false;
@@ -207,7 +214,7 @@ public:
         std::printf("\r\x1b[2K  Smoothness:  %.2f         "
                     "(0 = spiky, 1 = smooth)\n",
                     f.smoothness);
-        std::printf("\r\x1b[2K  Note:        %-2s           (strength %.2f)\n",
+        std::printf("\r\x1b[2K  Note:        %-4s         (strength %.2f)\n",
                     note_buf, note_str);
         std::printf("\r\x1b[2K  Speed:       %5s BPM\n", bpm_buf);
         std::printf("\r\x1b[2K──────────────────────────────────────────────────\n");

@@ -176,7 +176,9 @@ class OscSender:
           7    smoothness    float  0..1   1 = sine-like, 0 = transient
           8    centroid_hz   float  raw centroid in Hz
           9    centroid_n    float  0..1   log-mapped centroid (50..10k Hz)
-          10   note          int    dominant pitch class 0..11 (C=0, B=11)
+          10   note          int    MIDI note number (C-1=0, A4=69, C8=108)
+                                      pitch class = note % 12   (0=C..11=B)
+                                      octave      = note // 12 - 1
           11-22 chroma[12]   float  pitch-class energies, each 0..1
 
         Payload: ~136 bytes/packet. At chunk=2048 @ 44.1 kHz that's ~3 KB/s.
@@ -302,11 +304,26 @@ class FeatureExtractor:
         )
         bands_n = self.band_norm.normalize(bands_raw)
 
-        # ---- chroma (notes) -----------------------------------------------
+        # ---- chroma (pitch class) + best-octave search --------------------
         chroma = librosa.feature.chroma_stft(
             S=mag2[:, None], sr=rate,
         )[:, 0]
-        note_idx = int(np.argmax(chroma))
+        pitch_class = int(np.argmax(chroma))
+
+        # Within the dominant pitch class, pick the octave (1..7) whose
+        # fundamental bin carries the most spectral energy. ~7 lookups —
+        # negligible cost.
+        freq_step = float(self.freqs[1]) if len(self.freqs) > 1 else 1.0
+        best_oct, best_mag = 4, -1.0
+        for octave in range(1, 8):
+            midi = 12 * (octave + 1) + pitch_class      # MIDI: C-1=0, A4=69
+            f0 = 440.0 * (2.0 ** ((midi - 69) / 12.0))
+            b = int(round(f0 / freq_step))
+            if 0 <= b < len(mag):
+                m = float(mag[b])
+                if m > best_mag:
+                    best_mag, best_oct = m, octave
+        midi_note = 12 * (best_oct + 1) + pitch_class    # full MIDI number
 
         # ---- spectral flux → onset envelope (state for tempo) -------------
         if self.prev_mag is None or self.prev_mag.shape != mag.shape:
@@ -342,7 +359,8 @@ class FeatureExtractor:
             "smoothness":  smoothness,
             "centroid_hz": centroid_hz,
             "centroid_n":  centroid_n,
-            "note":        note_idx,
+            "note":        midi_note,                  # MIDI #, e.g. A4 = 69
+            "pitch_class": pitch_class,                # 0..11 (C..B)
             "chroma":      chroma.astype(np.float32),
         }
 
@@ -370,8 +388,10 @@ class Dashboard:
         bands = [f["bass"], f["mid"], f["treble"]]
         dom_band = BAND_LABELS[int(np.argmax(bands))]
 
-        note_strength = float(f["chroma"][f["note"]])
-        note = NOTES[f["note"]] if note_strength > 0.20 else "--"
+        pc = f["pitch_class"]
+        octave = f["note"] // 12 - 1
+        note_strength = float(f["chroma"][pc])
+        note = f"{NOTES[pc]}{octave}" if note_strength > 0.20 else "--"
         bpm_str = f"{f['bpm']:.1f}" if f["bpm"] > 0 else "---"
 
         lines = [

@@ -146,11 +146,16 @@ Math:
 
 ### Note (label)
 
-- **Range:** one of `C, C#, D, D#, E, F, F#, G, G#, A, A#, B` — or `--`.
+- **Range:** `<pitch class><octave>`, e.g. `C4`, `A#3`, `G2` — or `--`.
+- **Wire format:** sent as a **MIDI note number** in `args[10]` (int).
+  Convert with: `pitch_class = note % 12` (0=C..11=B), `octave = note / 12 - 1`.
+  Examples: A4 = 69, C4 (middle C) = 60, C2 = 36.
 - `--` is shown when the dominant chroma value is below `0.20` (no clear
   pitch — drums or noise dominate).
-- Computed as `argmax` of the 12-element chroma vector (octave-collapsed
-  pitch classes).
+- **How the octave is picked:** `argmax` of the chroma vector gives the
+  pitch class; we then look at the FFT bin of that pitch class's
+  fundamental in each octave (1..7) and pick the octave with the most
+  energy. ~7 lookups per chunk — negligible CPU.
 
 ### Strength
 
