@@ -403,6 +403,23 @@ class Dashboard:
 # Main pipeline                                                               #
 # --------------------------------------------------------------------------- #
 
+def find_loopback_input(p: pyaudio.PyAudio) -> Optional[int]:
+    """Return index of a virtual-loopback input device (BlackHole/Soundflower).
+
+    Looks for common names of virtual audio drivers (macOS = BlackHole /
+    Soundflower; Linux = pulse-loopback variants). Returns ``None`` if
+    nothing matches — caller should fall back to ``--input-device``.
+    """
+    needles = ("blackhole", "soundflower", "loopback", "monitor of")
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info["maxInputChannels"] <= 0:
+            continue
+        if any(n in info["name"].lower() for n in needles):
+            return i
+    return None
+
+
 def warmup_extractor(extractor: "FeatureExtractor") -> None:
     """Run a few silent chunks through the extractor to trigger numba JIT.
 
@@ -589,6 +606,145 @@ def listen_and_analyze(
     p.terminate()
 
 
+def loopback_and_analyze(
+    input_device: Optional[int] = None,
+    output_device: Optional[int] = None,
+    rate: int = 44100,
+    monitor: bool = True,
+    osc: Optional[OscSender] = None,
+) -> None:
+    """DAW-loopback mode: capture from a virtual audio device (e.g. BlackHole
+    on macOS) → feature dashboard → optionally pass audio through to your
+    real speakers in real time.
+
+    macOS setup:
+      1. ``brew install --cask blackhole-2ch``
+      2. In *Audio MIDI Setup* create a Multi-Output Device containing
+         BlackHole + your speakers; pick it as system output (or use it as
+         the output device inside GarageBand).
+      3. Run with ``--midi``. BlackHole is auto-detected; pass
+         ``--input-device N`` to override.
+    """
+    p = pyaudio.PyAudio()
+
+    try:
+        if input_device is None:
+            input_device = find_loopback_input(p)
+            if input_device is None:
+                print(
+                    "error: no loopback/BlackHole-like input device found.\n"
+                    "  macOS: brew install --cask blackhole-2ch\n"
+                    "  Then route the DAW through BlackHole (Multi-Output\n"
+                    "  Device) and rerun, or pass --input-device N "
+                    "explicitly (see --list-devices).",
+                    file=sys.stderr,
+                )
+                p.terminate()
+                return
+        info = p.get_device_info_by_index(input_device)
+        in_channels = max(1, min(int(info["maxInputChannels"]), 2))
+        print(f"using loopback input [{input_device}] {info['name']} "
+              f"({in_channels}ch)")
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        p.terminate()
+        return
+
+    try:
+        in_stream = p.open(
+            format=pyaudio.paFloat32,
+            channels=in_channels,
+            rate=rate,
+            input=True,
+            input_device_index=input_device,
+            frames_per_buffer=CHUNK,
+        )
+    except OSError as e:
+        print(f"error: failed to open loopback input at {rate} Hz: {e}",
+              file=sys.stderr)
+        p.terminate()
+        return
+
+    out_stream = None
+    if monitor:
+        try:
+            if output_device is None:
+                out_info = p.get_default_output_device_info()
+                output_device = int(out_info["index"])
+            else:
+                out_info = p.get_device_info_by_index(output_device)
+            print(f"monitoring through [{output_device}] {out_info['name']}")
+            out_stream = p.open(
+                format=pyaudio.paFloat32,
+                channels=in_channels,
+                rate=rate,
+                output=True,
+                output_device_index=output_device,
+                frames_per_buffer=CHUNK,
+            )
+        except OSError as e:
+            print(f"warning: monitoring disabled ({e})", file=sys.stderr)
+            out_stream = None
+
+    extractor = FeatureExtractor(rate=rate, chunk=CHUNK)
+    warmup_extractor(extractor)
+
+    print(
+        f"loopback: {info['name']} | {rate} Hz | {in_channels}ch | "
+        f"chunk={CHUNK} samples (~{1000 * CHUNK / rate:.0f} ms)"
+    )
+    if osc is not None:
+        print(f"sending OSC to {osc.host}:{osc.port} as /audio/frame")
+    print("(press Ctrl-C to stop)")
+
+    dashboard = Dashboard(title="loopback (sender)")
+    sent_seq = 0
+
+    try:
+        last_print_t = -1e9
+        frames_read = 0
+        while True:
+            raw = in_stream.read(CHUNK, exception_on_overflow=False)
+            if out_stream is not None:
+                # Pass-through: write the same bytes we read, so the user
+                # still hears the DAW through their real speakers.
+                out_stream.write(raw)
+
+            buf = np.frombuffer(raw, dtype=np.float32)
+            if in_channels > 1:
+                mono = buf.reshape(-1, in_channels).mean(axis=1).astype(
+                    np.float32)
+            else:
+                mono = buf.copy()
+
+            feats = extractor(mono)
+
+            t = frames_read / rate
+            if osc is not None:
+                osc.send(t, feats)
+                sent_seq = osc.seq
+            else:
+                sent_seq += 1
+
+            if t - last_print_t >= 1.0 / PRINT_HZ:
+                dashboard.render(t, feats, sent_seq)
+                last_print_t = t
+            frames_read += CHUNK
+    except KeyboardInterrupt:
+        captured = frames_read / rate
+        print(f"\nstopped after {captured:.1f}s.")
+    finally:
+        for s in (in_stream, out_stream):
+            if s is None:
+                continue
+            try:
+                s.stop_stream()
+                s.close()
+            except Exception:
+                pass
+        p.terminate()
+
+
 def _playback_recording(
     p: pyaudio.PyAudio,
     recording: list[np.ndarray],
@@ -660,6 +816,16 @@ def main() -> int:
         help="capture from the microphone instead of playing a file",
     )
     parser.add_argument(
+        "--midi", action="store_true",
+        help="capture from a virtual loopback device (e.g. BlackHole on "
+             "macOS) and pass through to speakers — for analyzing live "
+             "GarageBand/DAW output",
+    )
+    parser.add_argument(
+        "--no-monitor", action="store_true",
+        help="in --midi mode, don't pass captured audio through to speakers",
+    )
+    parser.add_argument(
         "--input-device", type=int, default=None,
         help="input device index (with --mic; see --list-devices)",
     )
@@ -706,6 +872,22 @@ def main() -> int:
         return 0
 
     osc = None if args.no_osc else OscSender(args.osc_host, args.osc_port)
+
+    if args.midi:
+        if args.mic or args.song is not None:
+            print("[info] --midi takes precedence over --mic / song path",
+                  file=sys.stderr)
+        try:
+            loopback_and_analyze(
+                input_device=args.input_device,
+                output_device=args.device,
+                rate=args.rate,
+                monitor=not args.no_monitor,
+                osc=osc,
+            )
+        except KeyboardInterrupt:
+            print("\ninterrupted.")
+        return 0
 
     if args.mic:
         if args.song is not None:
