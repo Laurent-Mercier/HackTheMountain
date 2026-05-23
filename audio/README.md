@@ -224,11 +224,290 @@ Failure modes to watch for:
 
 ## Where these values come from
 
-- **Producer:** `main.py` — Python, real-time audio pipeline (file or mic).
-  See the `FeatureExtractor` and `OscSender` classes for the exact formulas.
+- **Producer:** the [`audio_brain`](audio_brain/) Python package — real-time
+  audio pipelines for file / mic / loopback input. See
+  [`FeatureExtractor`](audio_brain/extractor.py) and
+  [`OscSender`](audio_brain/osc.py) for the exact formulas.
 - **Wire format:** OSC over UDP localhost, address `/audio/frame`,
-  ~136 bytes per packet at ~21 Hz. Full schema is in the `OscSender`
-  docstring and mirrored in `osc_receiver.cpp`.
-- **Consumer (PoC):** `osc_receiver.cpp` — single-file C++ receiver that
-  prints the same dashboard. Drop its `Frame` struct and
-  `parse_audio_frame` into your real visualizer to consume the stream.
+  ~136 bytes per packet at ~21 Hz. Full schema lives in the `OscSender`
+  docstring (and is mirrored verbatim in `receiver/include/Frame.hpp`
+  and `receiver/src/OscParser.cpp`).
+- **Consumer:** the [`receiver/`](receiver/) C++ module — `UdpListener`,
+  `OscParser`, `SequenceTracker`, `Dashboard`, all glued together by a
+  single `Receiver::run()` loop. Drop the headers under `receiver/include/`
+  into your real visualizer to consume the stream.
+
+---
+
+# Repository layout
+
+This project is **Docker-only**: there is no bare-metal Python or
+Make build path. Everything ships as two container images.
+
+```
+audio/
+├── audio_brain/                 # Python package — the producer
+│   ├── __init__.py              # public API re-exports
+│   ├── config.py                # constants (CHUNK, BANDS, NOTES, …)
+│   ├── osc.py                   # OscSender — OSC wire-format sender
+│   ├── normalizer.py            # RollingPeak — running-peak normaliser
+│   ├── extractor.py             # FeatureExtractor — one FFT, all features
+│   ├── dashboard.py             # Dashboard — ANSI in-place renderer
+│   ├── devices.py               # Pulse routing, device pick, stream open
+│   ├── loaders.py               # load_streamer (soundfile + librosa)
+│   ├── pipelines.py             # BasePipeline + File / Mic / Loopback
+│   └── cli.py                   # argparse entry point
+├── receiver/                    # C++ package — the consumer
+│   ├── include/
+│   │   ├── Frame.hpp            # decoded /audio/frame struct
+│   │   ├── OscParser.hpp        # parse_audio_frame()
+│   │   ├── UdpListener.hpp      # RAII UDP socket
+│   │   ├── SequenceTracker.hpp  # loss / gap accounting
+│   │   ├── Dashboard.hpp        # ANSI in-place render
+│   │   └── Receiver.hpp         # orchestrator
+│   ├── src/                     # one .cpp per header (+ main.cpp)
+│   ├── Makefile                 # used inside the receiver image
+│   └── Dockerfile               # multi-stage build (~80 MB runtime)
+├── Dockerfile                   # producer (Python + PortAudio + pulse plugin)
+├── docker-entrypoint.sh         # subcommand wrapper inside the producer
+├── docker-compose.yml           # the two services + recipes per mode
+├── docker-compose.linux.yml     # Pulse socket bind-mount (Linux only)
+├── play.sh                      # one-command UX (recommended entry point)
+├── scripts/
+│   ├── interactive-pulse-pick.sh  # host device picker (pactl)
+│   ├── pulse-split-routes.sh      # auto laptop mic → Bluetooth
+│   └── host-pulse-tcp.sh          # macOS/Windows Pulse TCP server
+├── .pulse-route.env             # saved PULSE_* routes (gitignored; optional)
+└── Darude - Sandstorm.mp3       # demo song (bind-mounted into the producer)
+```
+
+The Python pipelines (file / mic / loopback) share a single
+`BasePipeline.run()` loop — each subclass only implements how to open
+the right PortAudio streams and yield mono `CHUNK`-sized buffers.
+Adding a new input mode (e.g. WebRTC, RTSP) is a ~30-line subclass.
+
+The C++ receiver follows the same module-per-responsibility split:
+`UdpListener` is an RAII socket wrapper, `OscParser` is a free function
+in the `audio_brain::osc` namespace, `SequenceTracker` is a header-only
+counter, `Dashboard` owns the ANSI render state, and `Receiver` glues
+them together with a single `run()` method that mirrors
+`BasePipeline.run()` on the Python side.
+
+# Dashboard (receiver terminal)
+
+With the default Docker workflow (`./play.sh`), only the **C++ receiver**
+dashboard is shown in your terminal (`─── osc-receiver ───`). The Python
+sender still extracts features and sends OSC, but skips its own ANSI dashboard
+to avoid jumbled output from two containers logging at once.
+
+Run the sender alone with `--no-osc` if you want the Python dashboard instead.
+
+# Quickstart — `play.sh`
+
+Recommended entry point: one command, one terminal, one Ctrl-C stops both
+containers. Flags can appear **before or after** the song path.
+
+```bash
+cd audio
+
+# Music (file → host speakers / headphones via Pulse)
+./play.sh                                          # default demo song
+./play.sh music "your-song.mp3"
+./play.sh music "your-song.mp3" --use-route        # saved playback device
+./play.sh music "song.mp3" --pick-audio --save-route
+
+# Microphone (capture + OSC; optional live monitor)
+./play.sh mic                                      # record only, replay on stop
+./play.sh mic --monitor                            # live pass-through, no replay
+./play.sh mic --monitor --replay                   # live + full replay after Ctrl-C
+./play.sh mic --monitor --use-route                # saved mic + output route
+./play.sh mic --monitor --pick-audio --save-route  # interactive pick + save route
+
+# Laptop mic + Bluetooth earbuds (auto split via pactl)
+./play.sh mic --monitor --split-audio
+
+# Virtual loopback / DAW
+./play.sh midi
+
+# Device discovery
+./play.sh pick                                     # interactive Pulse menu
+./play.sh pulse-routes                             # pactl list (raw)
+./play.sh list-devices                             # PortAudio indices (in container)
+./play.sh help
+```
+
+### `play.sh` audio flags
+
+| Flag | Meaning |
+|------|---------|
+| `--pick-audio`, `-i` | Interactive picker (`pactl` on host). Music: playback only. Mic/midi: capture then playback. |
+| `--save-route` | With `--pick-audio`, write `audio/.pulse-route.env` |
+| `--use-route` | Load `audio/.pulse-route.env` (music uses **sink** only; mic uses sink + source) |
+| `--split-audio` | Auto-select built-in mic + first Bluetooth sink (mic/midi only) |
+
+Saved route example:
+
+```bash
+./play.sh mic --monitor --pick-audio --save-route
+# later:
+./play.sh mic --monitor --use-route
+./play.sh music "Darude - Sandstorm.mp3" --use-route
+```
+
+### Where sound actually plays
+
+| Mode | You hear audio from… | Terminal shows… |
+|------|----------------------|-----------------|
+| **music** | Python sender → Pulse → your sink | Receiver OSC dashboard |
+| **mic** (no `--monitor`) | Replay on Ctrl-C only (if not `--no-playback`) | Receiver dashboard |
+| **mic --monitor** | Python sender (live monitor) | Receiver dashboard |
+| **midi** | Python sender (pass-through) | Receiver dashboard |
+
+Inside Docker, playback uses Pulse (`PULSE_SINK` / `PULSE_SOURCE`), not raw
+ALSA `hw:*` devices. On PipeWire HiFi laptops, pick **Mic1** not **Mic2** for
+capture. Bluetooth devices appear as `bluez_output…` / `bluez_input…` in the
+picker (labelled **Bluetooth headphones** / **Bluetooth headset mic**).
+
+### What `play.sh` does
+
+1. Builds `ht-receiver` and `ht-audio` images (cached after the first run).
+2. Starts both on Docker bridge network `htnet`; sender → **`receiver:9000`**.
+3. Routes audio through the host Pulse/PipeWire socket (Linux) or TCP (macOS/Win).
+4. Streams **receiver** logs in the terminal; sender logs: `docker logs audio-mic-1`.
+5. **Ctrl-C once** stops both containers.
+
+# Cross-platform audio
+
+One `./play.sh` command on every OS. **OSC works the same everywhere**
+(bridge network + service DNS). **Playback** uses different host hooks:
+
+| OS | Host audio hook | Before first run |
+|----|-----------------|------------------|
+| **Linux** | Unix socket `unix:/run/pulse/native` (PipeWire/Pulse) | Nothing — `play.sh` adds `docker-compose.linux.yml` automatically |
+| **macOS** | PulseAudio **TCP** `tcp:host.docker.internal:4713` | `./scripts/host-pulse-tcp.sh` (needs `brew install pulseaudio`) |
+| **Windows** | Same TCP URL | `./scripts/host-pulse-tcp.sh` (PulseAudio on the host) |
+
+### Linux (default — no extra steps)
+
+PipeWire or Pulse exposes `$XDG_RUNTIME_DIR/pulse/native`. The producer
+container mounts that socket and plays through your normal desktop audio.
+
+### macOS / Windows
+
+Docker cannot see Core Audio / WASAPI directly. Instead the producer
+talks to **PulseAudio running on the host** over TCP:
+
+```bash
+# once per session (or add to your shell profile)
+./scripts/host-pulse-tcp.sh
+
+# then the usual workflow
+./play.sh music "Darude - Sandstorm.mp3"
+```
+
+`host-pulse-tcp.sh` starts PulseAudio with `module-native-protocol-tcp` on
+port **4713** (`auth-anonymous=1` — fine for local dev only). Containers
+set `PULSE_SERVER=tcp:host.docker.internal:4713` automatically.
+
+**Mic / loopback on Mac:** route input through a virtual device
+(BlackHole, VB-Cable) **into host Pulse**, then use `./play.sh mic` or
+`./play.sh midi`. The container sees whatever Pulse exposes.
+
+### OSC (all platforms)
+
+| Piece | Address |
+|-------|---------|
+| Sender → receiver (inside compose) | `receiver:9000` |
+| Host → receiver (debugging) | `localhost:9000` (UDP port published) |
+
+The C++ receiver binds **`0.0.0.0:9000`** inside its container so port
+mapping and bridge networking both work. No `network_mode: host` required.
+
+# Direct `docker compose` recipes
+
+On **Linux**, include the audio override file:
+
+```bash
+cd audio
+export OSC_HOST=receiver PULSE_SERVER=unix:/run/pulse/native
+docker compose -f docker-compose.yml -f docker-compose.linux.yml build
+
+docker compose -f docker-compose.yml -f docker-compose.linux.yml run --rm receiver
+docker compose -f docker-compose.yml -f docker-compose.linux.yml run --rm music "Darude - Sandstorm.mp3"
+```
+
+On **macOS / Windows**, start `./scripts/host-pulse-tcp.sh` first, then
+omit `docker-compose.linux.yml` (TCP pulse is the default in the base file).
+
+Any flag the Python CLI accepts is forwarded verbatim:
+
+```bash
+docker compose run --rm music song.mp3 --no-osc
+docker compose run --rm mic --rate 48000 --no-playback
+```
+
+Because `docker compose run` only foregrounds the named service, the
+two-terminal version of `play.sh` looks like:
+
+```bash
+# terminal 1 — receiver dashboard
+docker compose run --rm receiver
+
+# terminal 2 — sender (and host audio playback)
+docker compose run --rm music "Darude - Sandstorm.mp3"
+```
+
+# OSC destination overrides
+
+Default inside compose is **`receiver:9000`**. Override via env vars:
+
+```bash
+OSC_PORT=9001 ./play.sh
+OSC_HOST=receiver OSC_PORT=9001 docker compose run --rm music song.mp3
+```
+
+…or pass `--osc-host` / `--osc-port` directly to a sender:
+
+```bash
+docker compose run --rm mic --osc-host 192.168.1.42
+```
+
+# Audio routing — under the hood
+
+`play.sh` sets **`PULSE_SINK`** (playback) and optionally **`PULSE_SOURCE`**
+(capture) before starting containers. The Python producer opens PortAudio's
+**`default`** device (not raw `hw:*` cards) so libpulse honours those variables.
+
+Inside the producer image, ALSA's `default` PCM uses the
+`pcm.!default { type pulse }` plugin (`/etc/asound.conf` in the image).
+It connects wherever `PULSE_SERVER` points:
+
+- **Linux:** `unix:/run/pulse/native` (bind-mounted from the host)
+- **macOS / Windows:** `tcp:host.docker.internal:4713` (host PulseAudio)
+
+PipeWire's PulseAudio compatibility layer (the default on Arch, Fedora
+38+, Ubuntu 22.10+, etc.) exposes exactly this socket, so the recipe
+works out of the box. On hosts running plain PulseAudio it's identical.
+
+If the pulse socket isn't where we expect it:
+
+```bash
+ls "$XDG_RUNTIME_DIR/pulse"            # should list `native`
+echo "$XDG_RUNTIME_DIR"                # usually /run/user/<uid>
+```
+
+If `XDG_RUNTIME_DIR` is unset (some non-systemd setups), the compose
+file falls back to `/run/user/1000`. Export the variable or edit
+`docker-compose.yml` to suit.
+
+You'll see harmless warnings at container start — PortAudio probing
+JACK / dmix backends that aren't wired up:
+
+```
+Cannot connect to server socket err = No such file or directory
+jack server is not running or cannot be started
+```
+
+PortAudio still falls through to ALSA → pulse and the music plays.
+They'd disappear if a `jackd` server were running inside the container,
+but it's not worth the complexity here.

@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Build artefacts
+osc_receiver
+*.o
+*.so
+*.dylib
+build/
+dist/
+
+# Editor / OS junk
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Local data — keep the image lean. Mount music files at runtime via
+# `-v /host/path:/music` instead of baking them into the layer.
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aiff
+*.aif
+
+# Compiled C++ artefacts (kept out of both Docker contexts).
+receiver/src/*.o
+receiver/src/*.d
+receiver/osc_receiver
