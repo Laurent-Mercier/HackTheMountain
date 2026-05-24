@@ -13,7 +13,8 @@ namespace audio_brain {
 ///
 /// All ranges and units are inherited from the Python `OscSender`:
 ///
-///   * `t`           — seconds since stream start.
+///   * `t`           — elapsed seconds since stream start.
+///   * `total_time`  — file duration (music); mic/midi mirror `t`.
 ///   * `volume_db`   — dBFS clamped to [-80, 0].
 ///   * `bass / mid / treble` — band energies in [0, 1] (rolling-peak
 ///                              normalised by the sender).
@@ -28,6 +29,7 @@ namespace audio_brain {
 struct Frame {
     int32_t seq;
     float   t;
+    float   total_time;
     float   volume_db;
     float   bass, mid, treble;
     float   bpm;

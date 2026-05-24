@@ -34,7 +34,14 @@ class Dashboard:
         self.title = title
         self.first = True
 
-    def render(self, t: float, features: Mapping[str, Any], seq: int) -> None:
+    def render(
+        self,
+        t: float,
+        features: Mapping[str, Any],
+        seq: int,
+        *,
+        total_time: float | None = None,
+    ) -> None:
         """Re-paint the dashboard for a single feature snapshot.
 
         Parameters
@@ -46,7 +53,10 @@ class Dashboard:
             :meth:`audio_brain.extractor.FeatureExtractor.__call__`.
         seq
             Frame counter to display next to ``Time:``.
+        total_time
+            File duration or elapsed time (see :attr:`BasePipeline.total_time_s`).
         """
+        total = float(t if total_time is None else total_time)
         bands = [features["bass"], features["mid"], features["treble"]]
         dom_band = BAND_LABELS[int(np.argmax(bands))]
 
@@ -56,9 +66,13 @@ class Dashboard:
         note = f"{NOTES[pc]}{octave}" if note_strength > 0.20 else "--"
         bpm_str = f"{features['bpm']:.1f}" if features["bpm"] > 0 else "---"
 
+        if total > t + 0.05:
+            time_line = f"  Time:        {t:7.2f} / {total:7.2f} s  (frame #{seq})"
+        else:
+            time_line = f"  Time:        {t:7.2f} s     (frame #{seq})"
         lines = [
             f"─── {self.title} {'─' * (44 - len(self.title))}",
-            f"  Time:        {t:7.2f} s     (frame #{seq})",
+            time_line,
             f"  Volume:      {features['volume_db']:+6.1f} dB",
             f"  Frequency:   {dom_band:<6}      "
             f"(bass={bands[0]:.2f} mid={bands[1]:.2f} treble={bands[2]:.2f})",

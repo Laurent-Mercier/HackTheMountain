@@ -46,12 +46,21 @@ void Dashboard::render(const Frame& f, uint64_t received, uint64_t dropped) {
     else         first_ = false;
 
     std::printf("\r\x1b[2K─── osc-receiver ──────────────────────────────────\n");
-    std::printf("\r\x1b[2K  Time:        %7.2f s     "
-                "(frame #%-6lu  dropped %lu / %lu)\n",
-                f.t,
-                static_cast<unsigned long>(received),
-                static_cast<unsigned long>(dropped),
-                static_cast<unsigned long>(received + dropped));
+    if (f.total_time > f.t + 0.05f) {
+        std::printf("\r\x1b[2K  Time:        %7.2f / %7.2f s  "
+                    "(frame #%-6lu  dropped %lu / %lu)\n",
+                    f.t, f.total_time,
+                    static_cast<unsigned long>(received),
+                    static_cast<unsigned long>(dropped),
+                    static_cast<unsigned long>(received + dropped));
+    } else {
+        std::printf("\r\x1b[2K  Time:        %7.2f s     "
+                    "(frame #%-6lu  dropped %lu / %lu)\n",
+                    f.t,
+                    static_cast<unsigned long>(received),
+                    static_cast<unsigned long>(dropped),
+                    static_cast<unsigned long>(received + dropped));
+    }
     std::printf("\r\x1b[2K  Volume:      %+6.1f dB\n", f.volume_db);
     std::printf("\r\x1b[2K  Frequency:   %-6s      "
                 "(bass=%.2f mid=%.2f treble=%.2f)\n",

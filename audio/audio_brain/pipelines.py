@@ -38,7 +38,7 @@ from .devices import (
     routes_through_pulse,
 )
 from .extractor import FeatureExtractor
-from .loaders import load_streamer
+from .loaders import audio_duration_s, load_streamer
 from .osc import OscSender
 
 
@@ -101,6 +101,8 @@ class BasePipeline:
         self._frames = 0
         self._sent_seq = 0
         self._last_print_t = -1e9
+        #: Fixed stream length (music/file). ``None`` → live modes use elapsed time.
+        self._total_time_s: Optional[float] = None
 
     # ------------------------------------------------------------------ #
     # Subclass-customisation hooks                                       #
@@ -203,6 +205,13 @@ class BasePipeline:
         """Stream-relative time in seconds (``frames / rate``)."""
         return self._frames / self.rate
 
+    @property
+    def total_time_s(self) -> float:
+        """Total stream length for OSC (file duration, or elapsed time live)."""
+        if self._total_time_s is not None and self._total_time_s > 0:
+            return self._total_time_s
+        return self.stream_time_s
+
     # ------------------------------------------------------------------ #
     # Internals                                                          #
     # ------------------------------------------------------------------ #
@@ -216,8 +225,9 @@ class BasePipeline:
         """Extract features, send OSC, and optionally refresh the dashboard."""
         feats = self.extractor(mono)
         t = self.stream_time_s
+        total_t = self.total_time_s
         if self.osc is not None:
-            self.osc.send(t, feats)
+            self.osc.send(t, feats, total_time=total_t)
             self._sent_seq = self.osc.seq
         else:
             self._sent_seq += 1
@@ -225,7 +235,7 @@ class BasePipeline:
         # With OSC, the C++ receiver owns the dashboard (avoids duplicate/jumbled
         # output when play.sh streams container logs).
         if self.osc is None and t - self._last_print_t >= 1.0 / PRINT_HZ:
-            self.dashboard.render(t, feats, self._sent_seq)
+            self.dashboard.render(t, feats, self._sent_seq, total_time=total_t)
             self._last_print_t = t
 
         self._frames += self.chunk
@@ -288,6 +298,7 @@ class FilePlaybackPipeline(BasePipeline):
         self.device_index = device_index
         self._blocks = blocks
         self._out_stream: Optional[pyaudio.Stream] = None
+        self._total_time_s = audio_duration_s(path)
 
     def setup(self) -> None:
         print_pulse_routing()
@@ -324,8 +335,8 @@ class FilePlaybackPipeline(BasePipeline):
         latency_ms = 1000 * self.chunk / self.rate
         print(
             f"playing: {self.path.name} | {self.rate} Hz | "
-            f"{self.channels}ch | chunk={self.chunk} samples "
-            f"(~{latency_ms:.0f} ms)"
+            f"{self.channels}ch | duration={self._total_time_s:.1f}s | "
+            f"chunk={self.chunk} samples (~{latency_ms:.0f} ms)"
         )
         super().announce()
 

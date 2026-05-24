@@ -54,10 +54,11 @@ bool parse_audio_frame(const uint8_t* buf, std::size_t n, Frame& out) {
     if (read_str(p, end) != "/audio/frame") return false;
 
     std::string_view types = read_str(p, end);
-    if (types.size() != 24 || types[0] != ',') return false;
+    if (types.size() != 25 || types[0] != ',') return false;
 
     out.seq         = read_i32(p, end);
     out.t           = read_f32(p, end);
+    out.total_time  = read_f32(p, end);
     out.volume_db   = read_f32(p, end);
     out.bass        = read_f32(p, end);
     out.mid         = read_f32(p, end);

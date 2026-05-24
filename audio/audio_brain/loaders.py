@@ -12,6 +12,21 @@ import soundfile as sf
 from .config import CHUNK
 
 
+def audio_duration_s(path: Path) -> float:
+    """Return the length of an audio file in seconds (metadata only)."""
+    try:
+        with sf.SoundFile(str(path)) as song:
+            if song.frames > 0 and song.samplerate > 0:
+                return float(song.frames) / float(song.samplerate)
+    except RuntimeError:
+        pass
+    y, rate = librosa.load(str(path), sr=None, mono=False)
+    if rate <= 0:
+        return 0.0
+    n = y.shape[-1] if y.ndim > 1 else len(y)
+    return float(n) / float(rate)
+
+
 def load_streamer(path: Path) -> Tuple[int, int, Iterator[np.ndarray]]:
     """Open ``path`` and return ``(sample_rate, channels, block_iterator)``.
 

@@ -23,9 +23,12 @@ Example dashboard line group:
 
 ## Time
 
-- **Range:** `0.0 → ∞` seconds (float).
-- File mode: `0` to the file's duration. Mic mode: `0` until you Ctrl-C.
-- Counts playback time from the start of the stream, **not** wall-clock.
+| Field | Range | Meaning |
+| ----- | ----- | ------- |
+| `t` | `0.0 → ∞` s | Elapsed playback/capture time from stream start (not wall-clock). |
+| `total_time` | `0.0 → ∞` s | **Music:** full file length (constant). **Mic / midi:** same as `t` (open-ended). |
+
+File mode: `t` goes `0 → total_time`. Mic/midi: both grow together until you stop.
 
 ## Frame # and Dropped
 
