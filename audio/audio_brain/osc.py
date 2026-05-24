@@ -42,8 +42,8 @@ class OscSender:
         12..23 ``chroma[12]`` float  pitch-class energies, each ``0..1``
         ============  ======  ============================================
 
-    Payload: ~140 bytes/packet. At ``CHUNK = 2048 @ 44.1 kHz`` that's
-    ~3 KB/s — vanishingly small even on the slowest network link.
+    Payload: ~140 bytes/packet. At ``CHUNK = 512 @ 44.1 kHz`` that's
+    ~12 KB/s — still tiny on localhost / Docker bridge.
     """
 
     def __init__(

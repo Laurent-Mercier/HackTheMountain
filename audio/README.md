@@ -34,7 +34,7 @@ File mode: `t` goes `0 → total_time`. Mic/midi: both grow together until you s
 
 | Field      | Range                  | Meaning                                                                        |
 | ---------- | ---------------------- | ------------------------------------------------------------------------------ |
-| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~21 Hz that's ~3 years of streaming before overflow.    |
+| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~86 Hz (`CHUNK=512`) that's months of streaming before overflow. |
 | `dropped`  | `0 → frame #`          | packets the C++ side never saw, inferred from gaps in `seq`.                   |
 | `X / Y`    | `X` = dropped, `Y` = X + received | `0 / 1860` = perfect run; `3 / 9` = 3 lost out of 9 expected. |
 
@@ -232,7 +232,7 @@ Failure modes to watch for:
   [`FeatureExtractor`](audio_brain/extractor.py) and
   [`OscSender`](audio_brain/osc.py) for the exact formulas.
 - **Wire format:** OSC over UDP localhost, address `/audio/frame`,
-  ~136 bytes per packet at ~21 Hz. Full schema lives in the `OscSender`
+  ~140 bytes per packet at ~86 Hz (`CHUNK=512` @ 44.1 kHz). Full schema lives in the `OscSender`
   docstring (and is mirrored verbatim in `receiver/include/Frame.hpp`
   and `receiver/src/OscParser.cpp`).
 - **Consumer:** the [`receiver/`](receiver/) C++ module — `UdpListener`,

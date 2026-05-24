@@ -14,9 +14,9 @@ import numpy as np
 # Streaming / timing                                                          #
 # --------------------------------------------------------------------------- #
 
-#: Samples per audio block. ``2048 @ 44.1 kHz`` is ~46 ms of latency, the
-#: sweet spot between FFT resolution and real-time responsiveness.
-CHUNK: Final[int] = 2048
+#: Samples per audio block. ``512 @ 44.1 kHz`` is ~12 ms of latency (lower
+#: delay for mic/midi). FFT bin width is ~86 Hz (4× coarser than 2048).
+CHUNK: Final[int] = 512
 
 #: Dashboard refresh rate (Hz). The OSC stream is *not* rate-limited; only
 #: the on-screen render is throttled so the terminal can keep up.
