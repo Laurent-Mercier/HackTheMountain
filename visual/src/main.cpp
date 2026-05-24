@@ -181,7 +181,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
         return EXIT_FAILURE;
     }
 
-    SDL_Window* window = SDL_CreateWindow("visual", 1280, 720, 0);
+    SDL_Window* window = SDL_CreateWindow("visual", 1920, 1200, 0);
     if (!window) { SDL_Log("SDL_CreateWindow: %s", SDL_GetError()); SDL_Quit(); return EXIT_FAILURE; }
 
     SDL_GPUDevice* device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, nullptr);
