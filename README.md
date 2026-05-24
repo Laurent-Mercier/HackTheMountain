@@ -1,5 +1,12 @@
 # The eye is listening
 
+## Demo
+
+Pour rouler le code:
+
+- Dans audio, ./play.sh music --pick-route
+- Dans visual, créer dir build, cd dedans, cmake .., make, ./visual
+
 ## Inspiration
 
 Music has always been a visual experience in our minds,
