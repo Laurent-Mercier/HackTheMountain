@@ -314,20 +314,22 @@ cd audio
 ./play.sh                                          # default demo song
 ./play.sh music "your-song.mp3"
 ./play.sh music "your-song.mp3" --use-route        # saved playback device
-./play.sh music "song.mp3" --pick-audio --save-route
+./play.sh music "song.mp3" --pick-route --save-route
 
 # Microphone (capture + OSC; optional live monitor)
 ./play.sh mic                                      # record only, replay on stop
 ./play.sh mic --monitor                            # live pass-through, no replay
 ./play.sh mic --monitor --replay                   # live + full replay after Ctrl-C
 ./play.sh mic --monitor --use-route                # saved mic + output route
-./play.sh mic --monitor --pick-audio --save-route  # interactive pick + save route
+./play.sh mic --monitor --pick-route --save-route  # interactive pick + save route
 
 # Laptop mic + Bluetooth earbuds (auto split via pactl)
 ./play.sh mic --monitor --split-audio
 
-# Virtual loopback / DAW
+# Virtual loopback / DAW (monitor on by default; pick loopback source + output)
 ./play.sh midi
+./play.sh midi --use-route
+./play.sh midi --pick-route --save-route
 
 # Device discovery
 ./play.sh pick                                     # interactive Pulse menu
@@ -340,17 +342,18 @@ cd audio
 
 | Flag | Meaning |
 |------|---------|
-| `--pick-audio`, `-i` | Interactive picker (`pactl` on host). Music: playback only. Mic/midi: capture then playback. |
-| `--save-route` | With `--pick-audio`, write `audio/.pulse-route.env` |
-| `--use-route` | Load `audio/.pulse-route.env` (music uses **sink** only; mic uses sink + source) |
+| `--pick-route`, `--pick-audio`, `-i` | Interactive picker (`pactl` on host). Music: playback only. Mic: mic + output. Midi: loopback/monitor source + output. |
+| `--save-route` | With `--pick-route`, write `audio/.pulse-route.env` |
+| `--use-route` | Load `audio/.pulse-route.env` (music: **sink** only; mic/midi: sink + source) |
 | `--split-audio` | Auto-select built-in mic + first Bluetooth sink (mic/midi only) |
 
 Saved route example:
 
 ```bash
-./play.sh mic --monitor --pick-audio --save-route
+./play.sh mic --monitor --pick-route --save-route
 # later:
 ./play.sh mic --monitor --use-route
+./play.sh midi --use-route
 ./play.sh music "Darude - Sandstorm.mp3" --use-route
 ```
 

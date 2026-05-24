@@ -1,7 +1,7 @@
 #!/bin/sh
 # Interactive Pulse/PipeWire device picker (host pactl).
 #
-# Sourced by play.sh (--pick-audio / ./play.sh pick). Sets PULSE_SINK and/or
+# Sourced by play.sh (--pick-route / ./play.sh pick). Sets PULSE_SINK and/or
 # PULSE_SOURCE from numbered menus. PipeWire lists idle devices as SUSPENDED —
 # that is normal until a stream starts.
 #
@@ -296,7 +296,7 @@ run_interactive_audio_route() {
     if [ "${SAVE_PULSE_ROUTE:-0}" = 1 ]; then
         _env_file="${PULSE_ROUTE_FILE:?PULSE_ROUTE_FILE not set}"
         {
-            echo "# Written by ./play.sh pick / --pick-audio"
+            echo "# Written by ./play.sh pick / --pick-route"
             echo "PULSE_SINK=$PULSE_SINK"
             [ -n "${PULSE_SOURCE:-}" ] && echo "PULSE_SOURCE=$PULSE_SOURCE"
         } >"$_env_file"

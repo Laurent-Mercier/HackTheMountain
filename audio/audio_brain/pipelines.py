@@ -32,6 +32,7 @@ from .devices import (
     open_best_stream,
     print_pulse_routing,
     pulse_env_routing,
+    resolve_loopback_capture_device,
     resolve_pulse_capture_device,
     resolve_pulse_playback_device,
     routes_through_pulse,
@@ -759,17 +760,17 @@ class LoopbackPipeline(BasePipeline):
         # BlackHole + your speakers; pick it as system output (or use it
         # as the output device inside GarageBand).
 
-    Pass ``--midi`` on the CLI to dispatch into this pipeline. BlackHole
-    is auto-detected; pass ``--input-device N`` to override.
+    Pass ``--midi`` on the CLI to dispatch into this pipeline. With Docker,
+    use ``play.sh midi --pick-route`` / ``--use-route`` so ``PULSE_SOURCE``
+    and ``PULSE_SINK`` select loopback capture and monitor output (same as
+    mic/music). BlackHole is auto-detected when no Pulse route is set.
 
     Parameters
     ----------
     input_device
-        PortAudio input device index. ``None`` triggers auto-detection
-        of a BlackHole / Soundflower / pulse-loopback device.
+        PortAudio input index. ``None`` → :func:`resolve_loopback_capture_device`.
     output_device
-        Where to monitor the captured audio so the user keeps hearing
-        the DAW through their real speakers. ``None`` = default output.
+        Monitor output index. ``None`` → :func:`resolve_pulse_playback_device`.
     rate
         Sample rate to request from the loopback input.
     monitor
@@ -795,22 +796,30 @@ class LoopbackPipeline(BasePipeline):
         self._in_stream: Optional[pyaudio.Stream] = None
         self._out_stream: Optional[pyaudio.Stream] = None
         self._in_channels: int = 1
+        self._out_channels: int = 1
         self._device_name: str = ""
 
     def setup(self) -> None:
+        print_pulse_routing()
+
         try:
             if self.input_device is None:
-                self.input_device = find_loopback_input(self.pa)
+                self.input_device = resolve_loopback_capture_device(self.pa)
                 if self.input_device is None:
                     raise PipelineAbort(
                         "no loopback/BlackHole-like input device found.\n"
+                        "  Docker: ./play.sh midi --pick-route (choose a "
+                        "Monitor of … or loopback source)\n"
                         "  macOS: brew install --cask blackhole-2ch\n"
-                        "  Then route the DAW through BlackHole (Multi-Output\n"
-                        "  Device) and rerun, or pass --input-device N "
-                        "explicitly (see --list-devices)."
+                        "  Or pass --input-device N (see --list-devices)."
                     )
             info = self.pa.get_device_info_by_index(self.input_device)
             self._device_name = str(info["name"])
+            if routes_through_pulse() and is_raw_alsa_hardware(self._device_name):
+                raise PipelineAbort(
+                    f"refusing raw ALSA device [{self.input_device}] "
+                    f"{self._device_name!r} while PULSE_SERVER is set."
+                )
             self._in_channels = max(1, min(int(info["maxInputChannels"]), 2))
             print(
                 f"using loopback input [{self.input_device}] "
@@ -820,39 +829,43 @@ class LoopbackPipeline(BasePipeline):
             raise PipelineAbort(str(exc)) from exc
 
         try:
-            self._in_stream = self._open_stream(
-                format=pyaudio.paFloat32,
-                channels=self._in_channels,
+            self._in_stream, self.rate, in_ch = open_best_stream(
+                self.pa,
+                direction="input",
+                device_index=self.input_device,
                 rate=self.rate,
-                input=True,
-                input_device_index=self.input_device,
                 frames_per_buffer=self.chunk,
             )
+            self._in_channels = in_ch
+            self._streams.append(self._in_stream)
         except OSError as exc:
             raise PipelineAbort(
-                f"failed to open loopback input at {self.rate} Hz: {exc}"
+                f"failed to open loopback input: {exc}"
             ) from exc
+        print(f"capture: {self.rate} Hz, {self._in_channels}ch")
 
         if not self.monitor:
             return
 
         try:
-            if self.output_device is None:
-                out_info = self.pa.get_default_output_device_info()
-                self.output_device = int(out_info["index"])
-            else:
-                out_info = self.pa.get_device_info_by_index(self.output_device)
+            out_idx = self.output_device
+            if out_idx is None and routes_through_pulse():
+                out_idx = resolve_pulse_playback_device(self.pa)
+            if out_idx is None:
+                out_idx = int(self.pa.get_default_output_device_info()["index"])
+            self.output_device = out_idx
+            out_info = self.pa.get_device_info_by_index(out_idx)
             print(
-                f"monitoring through [{self.output_device}] {out_info['name']}"
+                f"monitoring through [{out_idx}] {out_info['name']}"
             )
-            self._out_stream = self._open_stream(
-                format=pyaudio.paFloat32,
-                channels=self._in_channels,
+            self._out_stream, _, self._out_channels = open_best_stream(
+                self.pa,
+                direction="output",
+                device_index=out_idx,
                 rate=self.rate,
-                output=True,
-                output_device_index=self.output_device,
                 frames_per_buffer=self.chunk,
             )
+            self._streams.append(self._out_stream)
         except OSError as exc:
             print(f"warning: monitoring disabled ({exc})", file=sys.stderr)
             self._out_stream = None
@@ -867,14 +880,28 @@ class LoopbackPipeline(BasePipeline):
         super().announce()
         print("(press Ctrl-C to stop)")
 
+    def _write_monitor(self, raw: bytes) -> None:
+        if self._out_stream is None:
+            return
+        try:
+            buf = np.frombuffer(raw, dtype=np.float32)
+            if self._out_channels == 2 and self._in_channels == 1:
+                mono = buf.reshape(-1, self._in_channels).mean(axis=1)
+                stereo = np.column_stack([mono, mono])
+                self._out_stream.write(
+                    np.ascontiguousarray(stereo).tobytes()
+                )
+            else:
+                self._out_stream.write(raw)
+        except OSError as exc:
+            print(f"warning: monitor write failed: {exc}", file=sys.stderr)
+
     def iter_blocks(self) -> Iterator[np.ndarray]:
         assert self._in_stream is not None, "LoopbackPipeline not set up"
         while True:
             raw = self._in_stream.read(self.chunk, exception_on_overflow=False)
             if self._out_stream is not None:
-                # Pass-through: write the same bytes we read so the user
-                # still hears the DAW through their real speakers.
-                self._out_stream.write(raw)
+                self._write_monitor(raw)
             buf = np.frombuffer(raw, dtype=np.float32)
             if self._in_channels > 1:
                 mono = buf.reshape(-1, self._in_channels).mean(axis=1).astype(

@@ -429,6 +429,26 @@ def list_devices() -> None:
         p.terminate()
 
 
+def resolve_loopback_capture_device(p: pyaudio.PyAudio) -> Optional[int]:
+    """Capture device for :class:`LoopbackPipeline` (DAW / system audio).
+
+    When ``PULSE_SOURCE`` is set (``play.sh --use-route`` / ``--pick-route``),
+    returns PortAudio ``default`` so libpulse applies that source. Otherwise
+    prefers virtual loopback names (BlackHole, ``monitor of``, …), then any
+    Pulse-routed input.
+    """
+    if pulse_env_routing():
+        idx = resolve_pulse_capture_device(p)
+        if idx is not None:
+            return idx
+    idx = find_loopback_input(p)
+    if idx is not None:
+        return idx
+    if routes_through_pulse():
+        return find_pulse_input(p)
+    return None
+
+
 def find_loopback_input(p: pyaudio.PyAudio) -> Optional[int]:
     """Return the index of a virtual-loopback input device.
 

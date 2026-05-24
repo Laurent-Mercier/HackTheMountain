@@ -1,7 +1,7 @@
 #!/bin/sh
 # play.sh — build/start ht-receiver + ht-audio (music / mic / midi).
 #
-# Host audio goes through Pulse/PipeWire (see README.md). Use --pick-audio,
+# Host audio goes through Pulse/PipeWire (see README.md). Use --pick-route,
 # --use-route, or --split-audio to choose devices. Flags may appear before
 # or after the song path:  ./play.sh music "a b.mp3" --use-route
 set -e
@@ -20,21 +20,25 @@ Usage:
   ./play.sh                           # music, default song
   ./play.sh music ["song.mp3"]
   ./play.sh music "song.mp3" --use-route   # play on saved Bluetooth sink
-  ./play.sh music "song.mp3" --pick-audio  # pick playback device first
+  ./play.sh music "song.mp3" --pick-route # pick playback device first
   ./play.sh mic --monitor              # live monitor (no replay on stop)
-  ./play.sh mic --monitor --pick-audio # interactive mic + output selection
+  ./play.sh mic --monitor --pick-route # interactive mic + output selection
   ./play.sh mic --monitor --split-audio
                                        # auto laptop mic → Bluetooth out
   ./play.sh midi
+  ./play.sh midi --use-route
+  ./play.sh midi --pick-route --save-route
   ./play.sh pick                       # interactive audio device menu
   ./play.sh list-devices               # PortAudio indices (in container)
   ./play.sh pulse-routes               # host Pulse sinks/sources (pactl)
   ./play.sh help
 
-Audio selection (host Pulse/PipeWire via pactl):
-  --pick-audio, -i     prompt for playback output; mic/midi also pick capture
-  --save-route         with --pick-audio, write audio/.pulse-route.env
-  --use-route          load audio/.pulse-route.env (skip prompts)
+Audio routing (all modes: music, mic, midi):
+  --pick-route, --pick-audio, -i
+                       interactive Pulse picker (music: output only;
+                       mic: capture+output; midi: loopback+output)
+  --save-route         with --pick-route, write audio/.pulse-route.env
+  --use-route          load saved route from audio/.pulse-route.env
 
 Cross-platform audio:
   Linux     — PipeWire/Pulse Unix socket (automatic)
@@ -47,7 +51,7 @@ load_saved_route() {
     if [ ! -f "$ROUTE_FILE" ]; then
         echo "[play] no saved route at:" >&2
         echo "       $ROUTE_FILE" >&2
-        echo "[play] create one with:  ./play.sh mic --monitor --pick-audio --save-route" >&2
+        echo "[play] create one with:  ./play.sh <mode> --pick-route --save-route" >&2
         return 1
     fi
     # shellcheck disable=SC1090
@@ -102,7 +106,7 @@ setup_compose_env() {
         Linux)
             export COMPOSE_FILE="$COMPOSE_FILE:$SCRIPT_DIR/docker-compose.linux.yml"
             export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
-            if [ "${SPLIT_AUDIO:-0}" != 1 ] && [ "${PICK_AUDIO:-0}" != 1 ] \
+            if [ "${SPLIT_AUDIO:-0}" != 1 ] && [ "${PICK_ROUTE:-0}" != 1 ] \
                 && [ "${USE_SAVED_ROUTE:-0}" != 1 ]; then
                 sync_pulse_defaults
             fi
@@ -141,16 +145,16 @@ cleanup() {
 MODE="${1:-music}"
 [ "$#" -gt 0 ] && shift
 
-# Flags may appear before or after the song path (e.g. song.mp3 --use-route).
-PICK_AUDIO=0
+# Flags may appear before or after positional args (e.g. song.mp3 --use-route).
+PICK_ROUTE=0
 SAVE_PULSE_ROUTE=0
 USE_SAVED_ROUTE=0
 SPLIT_AUDIO=0
 _POSFILE=$(mktemp)
 for _arg in "$@"; do
     case "$_arg" in
-        --pick-audio|-i|--interactive|--pick-route)
-            PICK_AUDIO=1
+        --pick-route|--pick-audio|-i|--interactive)
+            PICK_ROUTE=1
             ;;
         --save-route)
             SAVE_PULSE_ROUTE=1
@@ -203,7 +207,7 @@ case "$MODE" in
         pactl list sources short
         echo ""
         echo "Interactive picker:  ./play.sh pick"
-        echo "Use with mic:        ./play.sh mic --monitor --pick-audio"
+        echo "Use with mic/midi:   ./play.sh mic --monitor --pick-route"
         exit 0 ;;
 esac
 
@@ -216,8 +220,8 @@ case "$MODE" in
         exit 2 ;;
 esac
 
-if [ "$SAVE_PULSE_ROUTE" = 1 ] && [ "$PICK_AUDIO" != 1 ]; then
-    echo "[play] --save-route requires --pick-audio (or run ./play.sh pick)" >&2
+if [ "$SAVE_PULSE_ROUTE" = 1 ] && [ "$PICK_ROUTE" != 1 ]; then
+    echo "[play] --save-route requires --pick-route (or run ./play.sh pick)" >&2
     exit 2
 fi
 
@@ -248,7 +252,7 @@ if [ "$USE_SAVED_ROUTE" = 1 ]; then
     fi
 fi
 
-if [ "$PICK_AUDIO" = 1 ]; then
+if [ "$PICK_ROUTE" = 1 ]; then
     if [ ! -f "$PICK_SCRIPT" ]; then
         echo "[play] missing $PICK_SCRIPT" >&2
         exit 1
@@ -281,7 +285,7 @@ if [ -n "${PULSE_SOURCE:-}" ]; then
     echo "[play] pulse source (capture): ${PULSE_SOURCE}"
 fi
 if [ "$SENDER" = "music" ] && [ -z "${PULSE_SINK:-}" ]; then
-    echo "[play] tip: use --use-route or --pick-audio to target Bluetooth" >&2
+    echo "[play] tip: use --use-route or --pick-route to target Bluetooth" >&2
 fi
 if [ "$SENDER" = "mic" ] || [ "$SENDER" = "midi" ]; then
     echo "[play] live audio = sender container (Pulse). Receiver = OSC dashboard only."
