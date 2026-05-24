@@ -51,7 +51,12 @@ class OscSender:
         self.host = host
         self.port = port
         self.client = SimpleUDPClient(host, port)
+        self._extra_clients: list[SimpleUDPClient] = []
         self.seq: int = 0
+
+    def add_target(self, host: str, port: int) -> None:
+        """Register an additional OSC destination that receives every frame."""
+        self._extra_clients.append(SimpleUDPClient(host, port))
 
     def send(
         self,
@@ -95,6 +100,8 @@ class OscSender:
         values.extend(float(v) for v in features["chroma"])
         try:
             self.client.send_message("/audio/frame", values)
+            for extra in self._extra_clients:
+                extra.send_message("/audio/frame", values)
         except OSError:
             pass
         self.seq += 1

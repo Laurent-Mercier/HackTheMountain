@@ -21,7 +21,7 @@ layout(set = 3, binding = 1) uniform AudioUniforms {
     float centroid_n;    // [0, 1]    log-mapped perceptual brightness
     float note;          // [0, 127]  MIDI note number; pitch class = mod(note, 12.0), octave = floor(note/12.0)-1
     float note_strength; // [0, 1]    chroma energy of dominant note
-    float _pad[2];
+    vec2  _pad;
     vec4  chroma[3];     // 12 pitch-class energies packed as 3×vec4
                          // chroma[0].xyzw = C C# D D#, [1] = E F F# G, [2] = G# A A# B
 } audio;
@@ -33,7 +33,7 @@ mat2 rot(float x) {return mat2(cos(x), sin(x), -sin(x), cos(x));}
 vec3 palette(float t) {return vec3(.5) + vec3(.5) * cos(6.28318 * (vec3(1) * t * 0.1 + vec3(0, .33, .67)));}
 
 float get_time() {
-    return time * mouse.x * 5.;
+    return time + audio.bass * 2;
 }
 
 vec3 tile(vec3 p) {

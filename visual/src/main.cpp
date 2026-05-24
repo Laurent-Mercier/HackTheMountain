@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -55,6 +56,7 @@ static_assert(sizeof(AudioUniforms) % 16 == 0);
 struct AudioFrame {
     int32_t seq;
     float   t;
+    float   total_time;
     float   volume_db;
     float   bass, mid, treble;
     float   bpm;
@@ -103,11 +105,12 @@ bool parse_audio_frame(const uint8_t* buf, size_t n, AudioFrame& out) {
     try {
         if (read_str(p, end) != "/audio/frame") return false;
         std::string_view types = read_str(p, end);
-        if (types.size() != 24 || types[0] != ',') return false;
+        if (types.size() != 25 || types[0] != ',') return false;
 
-        out.seq         = read_i32(p, end);
-        out.t           = read_f32(p, end);
-        out.volume_db   = read_f32(p, end);
+        out.seq        = read_i32(p, end);
+        out.t          = read_f32(p, end);
+        out.total_time = read_f32(p, end);
+        out.volume_db  = read_f32(p, end);
         out.bass        = read_f32(p, end);
         out.mid         = read_f32(p, end);
         out.treble      = read_f32(p, end);
@@ -127,7 +130,7 @@ int open_udp_listener(int port) {
     ::fcntl(sock, F_SETFL, O_NONBLOCK);
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port        = htons(static_cast<uint16_t>(port));
     if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof addr) < 0) {
         ::close(sock); return -1;
@@ -227,7 +230,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     SDL_ReleaseGPUShader(device, frag);
 
     // OSC listener (non-blocking; drained each frame).
-    int osc_sock = osc::open_udp_listener(9000);
+    int osc_sock = osc::open_udp_listener(9001);
     if (osc_sock < 0) SDL_Log("OSC socket unavailable — audio data will be zeroed");
 
     int w = 1280, h = 720;
@@ -271,7 +274,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     audio.centroid_hz   = f.centroid_hz;
                     audio.centroid_n    = f.centroid_n;
                     audio.note          = static_cast<float>(f.note);
-                    audio.note_strength = f.chroma[f.note % 12];
+                    audio.note_strength = *std::max_element(f.chroma, f.chroma + 12);
                     std::memcpy(audio.chroma, f.chroma, sizeof f.chroma);
                 }
             }

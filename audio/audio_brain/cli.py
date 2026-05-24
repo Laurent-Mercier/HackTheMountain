@@ -158,6 +158,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     osc: Optional[OscSender] = None
     if not args.no_osc:
         osc = OscSender(args.osc_host, args.osc_port)
+        visual_host = os.environ.get("VISUAL_OSC_HOST")
+        visual_port = os.environ.get("VISUAL_OSC_PORT")
+        if visual_host and visual_port:
+            osc.add_target(visual_host, int(visual_port))
 
     if args.midi:
         if args.mic or args.song is not None:

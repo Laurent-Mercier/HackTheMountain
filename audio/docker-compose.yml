@@ -14,6 +14,8 @@ x-host-gateway: &host-gateway
 x-producer-env: &producer-env
   OSC_HOST: ${OSC_HOST:-receiver}
   OSC_PORT: ${OSC_PORT:-9000}
+  VISUAL_OSC_HOST: ${VISUAL_OSC_HOST:-host.docker.internal}
+  VISUAL_OSC_PORT: ${VISUAL_OSC_PORT:-9001}
   PULSE_SERVER: ${PULSE_SERVER:-tcp:host.docker.internal:4713}
   # Pin to the host's current default sink/source (play.sh sets on Linux).
   PULSE_SINK: ${PULSE_SINK:-}
