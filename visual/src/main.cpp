@@ -41,7 +41,7 @@ struct AudioUniforms {
     float smoothness;    // [0, 1]
     float centroid_hz;   // [0, 22050]
     float centroid_n;    // [0, 1]
-    float note;          // [0, 11] cast from int
+    float note;          // [0, 127] MIDI note number; pitch class = fmod(note, 12.0)
     float note_strength; // chroma energy of dominant note
     float _pad[2];
     float chroma[12];    // pitch-class energies; shader reads as vec4 chroma[3]
@@ -271,7 +271,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
                     audio.centroid_hz   = f.centroid_hz;
                     audio.centroid_n    = f.centroid_n;
                     audio.note          = static_cast<float>(f.note);
-                    audio.note_strength = f.chroma[f.note];
+                    audio.note_strength = f.chroma[f.note % 12];
                     std::memcpy(audio.chroma, f.chroma, sizeof f.chroma);
                 }
             }
