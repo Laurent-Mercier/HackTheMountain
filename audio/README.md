@@ -34,7 +34,7 @@ File mode: `t` goes `0 → total_time`. Mic/midi: both grow together until you s
 
 | Field      | Range                  | Meaning                                                                        |
 | ---------- | ---------------------- | ------------------------------------------------------------------------------ |
-| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~86 Hz (`CHUNK=512`) that's months of streaming before overflow. |
+| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~21 Hz (`CHUNK=2048`) that's months of streaming before overflow. |
 | `dropped`  | `0 → frame #`          | packets the C++ side never saw, inferred from gaps in `seq`.                   |
 | `X / Y`    | `X` = dropped, `Y` = X + received | `0 / 1860` = perfect run; `3 / 9` = 3 lost out of 9 expected. |
 
@@ -155,10 +155,12 @@ Math:
   Examples: A4 = 69, C4 (middle C) = 60, C2 = 36.
 - `--` is shown when the dominant chroma value is below `0.20` (no clear
   pitch — drums or noise dominate).
-- **How the octave is picked:** `argmax` of the chroma vector gives the
-  pitch class; we then look at the FFT bin of that pitch class's
-  fundamental in each octave (1..7) and pick the octave with the most
-  energy. ~7 lookups per chunk — negligible CPU.
+- **How the note is picked:** :func:`librosa.pyin` estimates the
+  fundamental (f0) on each chunk (C2..C7), median of voiced frames,
+  then EMA smoothing. Chroma on the wire is still STFT-based harmony;
+  the displayed **strength** uses pYIN voiced probability when available.
+- **Limits:** chords still report one note; very noisy or percussive
+  audio may show `--` or lag slightly behind fast runs.
 
 ### Strength
 
@@ -232,7 +234,7 @@ Failure modes to watch for:
   [`FeatureExtractor`](audio_brain/extractor.py) and
   [`OscSender`](audio_brain/osc.py) for the exact formulas.
 - **Wire format:** OSC over UDP localhost, address `/audio/frame`,
-  ~140 bytes per packet at ~86 Hz (`CHUNK=512` @ 44.1 kHz). Full schema lives in the `OscSender`
+  ~140 bytes per packet at ~21 Hz (`CHUNK=2048` @ 44.1 kHz). Full schema lives in the `OscSender`
   docstring (and is mirrored verbatim in `receiver/include/Frame.hpp`
   and `receiver/src/OscParser.cpp`).
 - **Consumer:** the [`receiver/`](receiver/) C++ module — `UdpListener`,

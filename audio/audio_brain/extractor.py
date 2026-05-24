@@ -1,18 +1,21 @@
-"""Streaming feature extractor — one FFT, three bands, chroma, tempo.
+"""Streaming feature extractor — one FFT, three bands, chroma, tempo, pYIN pitch.
 
 Per chunk the extractor performs:
 
 * one ``np.fft.rfft`` (the FFT we'd have to do anyway),
-* one :func:`librosa.feature.chroma_stft` (the only librosa call left),
-* everything else in plain NumPy — bands, centroid, crest factor, MIDI
-  note, spectral-flux onset envelope.
+* :func:`librosa.feature.chroma_stft` for the 12-D harmony vector on the wire,
+* :func:`librosa.pyin` for fundamental frequency → MIDI note (replaces the old
+  chroma-argmax + octave-scan heuristic),
+* everything else in plain NumPy — bands, centroid, crest factor,
+  spectral-flux onset envelope.
 
 State carried between calls:
 
 * ``prev_mag``       — previous magnitude spectrum (for spectral flux),
 * ``onset_history``  — bounded deque feeding the periodic tempo estimator,
 * ``band_norm``      — :class:`RollingPeak` for the three EQ bands,
-* ``tempo_bpm``      — last successful BPM estimate.
+* ``tempo_bpm``      — last successful BPM estimate,
+* ``_smooth_f0``     — EMA-smoothed fundamental (Hz) for stable note labels.
 """
 from __future__ import annotations
 
@@ -29,6 +32,12 @@ from .config import (
     CHUNK,
     CREST_LOG_MAX,
     CREST_LOG_MIN,
+    PITCH_CONFIDENCE_DECAY,
+    PITCH_FMAX_HZ,
+    PITCH_FMIN_HZ,
+    PITCH_MIN_RMS,
+    PITCH_SMOOTH_ALPHA,
+    PITCH_VOICED_THRESH,
     TEMPO_UPDATE_S,
     TEMPO_WINDOW_S,
     VOLUME_DB_FLOOR,
@@ -45,10 +54,6 @@ except AttributeError:                           # pragma: no cover
 
 class FeatureExtractor:
     """Lean, stateful feature extractor for a single mono stream.
-
-    Drops the heavy librosa calls (mel + mfcc + rolloff + bandwidth +
-    flatness) for a noticeable per-chunk CPU win; only the features
-    actually pushed over OSC are computed.
 
     The instance is callable: ``extractor(mono)`` returns a dictionary
     with the exact keys :class:`OscSender` expects.
@@ -70,6 +75,8 @@ class FeatureExtractor:
         "rate", "chunk", "win", "freqs", "band_masks", "band_norm",
         "prev_mag", "onset_history",
         "tempo_update_chunks", "chunks_since_tempo", "tempo_bpm",
+        "_smooth_f0", "_last_midi", "_note_confidence",
+        "_pyin_hop",
     )
 
     def __init__(
@@ -96,6 +103,12 @@ class FeatureExtractor:
         self.chunks_since_tempo = 0
         self.tempo_bpm: Optional[float] = None
 
+        self._smooth_f0: Optional[float] = None
+        self._last_midi: int = -1
+        self._note_confidence: float = 0.0
+        # Several pYIN frames inside each CHUNK block stabilise the median.
+        self._pyin_hop = max(256, chunk // 4)
+
     # ------------------------------------------------------------------ #
     # Lifecycle helpers                                                  #
     # ------------------------------------------------------------------ #
@@ -110,6 +123,9 @@ class FeatureExtractor:
         self.onset_history.clear()
         self.tempo_bpm = None
         self.chunks_since_tempo = 0
+        self._smooth_f0 = None
+        self._last_midi = -1
+        self._note_confidence = 0.0
 
     def warmup(self, n: int = 3) -> None:
         """Run a few low-noise chunks through the extractor.
@@ -122,6 +138,64 @@ class FeatureExtractor:
         for _ in range(n):
             self(warmup)
         self.reset_state()
+
+    # ------------------------------------------------------------------ #
+    # Pitch (pYIN)                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _estimate_pitch(self, mono: np.ndarray, rms: float) -> tuple[int, int, float]:
+        """Return ``(midi_note, pitch_class, confidence)`` for this chunk."""
+        if rms < PITCH_MIN_RMS:
+            self._note_confidence *= PITCH_CONFIDENCE_DECAY
+            if self._last_midi >= 0 and self._note_confidence >= 0.20:
+                pc = self._last_midi % 12
+                return self._last_midi, pc, self._note_confidence
+            return 0, 0, self._note_confidence
+
+        try:
+            f0, voiced_flag, voiced_probs = librosa.pyin(
+                mono.astype(np.float64),
+                fmin=PITCH_FMIN_HZ,
+                fmax=PITCH_FMAX_HZ,
+                sr=self.rate,
+                frame_length=self.chunk,
+                hop_length=self._pyin_hop,
+                fill_na=np.nan,
+            )
+        except Exception:
+            self._note_confidence *= PITCH_CONFIDENCE_DECAY
+            if self._last_midi >= 0 and self._note_confidence >= 0.20:
+                pc = self._last_midi % 12
+                return self._last_midi, pc, self._note_confidence
+            return 0, 0, self._note_confidence
+
+        mask = np.asarray(voiced_flag, dtype=bool) & (
+            np.asarray(voiced_probs) >= PITCH_VOICED_THRESH
+        )
+        f0_voiced = np.asarray(f0, dtype=np.float64)[mask]
+        f0_voiced = f0_voiced[np.isfinite(f0_voiced) & (f0_voiced > 0.0)]
+
+        if f0_voiced.size == 0:
+            self._note_confidence *= PITCH_CONFIDENCE_DECAY
+            if self._last_midi >= 0 and self._note_confidence >= 0.20:
+                pc = self._last_midi % 12
+                return self._last_midi, pc, self._note_confidence
+            return 0, 0, self._note_confidence
+
+        f0_med = float(np.median(f0_voiced))
+        conf = float(np.median(np.asarray(voiced_probs, dtype=np.float64)[mask]))
+
+        if self._smooth_f0 is None:
+            self._smooth_f0 = f0_med
+        else:
+            a = PITCH_SMOOTH_ALPHA
+            self._smooth_f0 = a * f0_med + (1.0 - a) * self._smooth_f0
+
+        midi = int(round(librosa.hz_to_midi(self._smooth_f0)))
+        midi = int(np.clip(midi, 0, 127))
+        self._last_midi = midi
+        self._note_confidence = float(np.clip(conf, 0.0, 1.0))
+        return midi, midi % 12, self._note_confidence
 
     # ------------------------------------------------------------------ #
     # Per-chunk feature pipeline                                         #
@@ -165,23 +239,15 @@ class FeatureExtractor:
         )
         bands_n = self.band_norm.normalize(bands_raw)
 
-        # Chroma + best-octave search.
+        # Chroma (harmony vector on the wire) + pYIN note label.
         chroma = librosa.feature.chroma_stft(
             S=mag2[:, None], sr=rate,
-        )[:, 0]
-        pitch_class = int(np.argmax(chroma))
-
-        freq_step = float(self.freqs[1]) if len(self.freqs) > 1 else 1.0
-        best_oct, best_mag = 4, -1.0
-        for octave in range(1, 8):
-            midi = 12 * (octave + 1) + pitch_class      # MIDI: C-1=0, A4=69
-            f0 = 440.0 * (2.0 ** ((midi - 69) / 12.0))
-            b = int(round(f0 / freq_step))
-            if 0 <= b < len(mag):
-                m = float(mag[b])
-                if m > best_mag:
-                    best_mag, best_oct = m, octave
-        midi_note = 12 * (best_oct + 1) + pitch_class
+        )[:, 0].astype(np.float32)
+        midi_note, pitch_class, note_conf = self._estimate_pitch(mono, rms)
+        if note_conf >= 0.20:
+            chroma[pitch_class] = float(
+                max(chroma[pitch_class], note_conf)
+            )
 
         # Spectral flux → onset envelope (state for tempo).
         if self.prev_mag is None or self.prev_mag.shape != mag.shape:
@@ -219,5 +285,6 @@ class FeatureExtractor:
             "centroid_n":  centroid_n,
             "note":        midi_note,
             "pitch_class": pitch_class,
-            "chroma":      chroma.astype(np.float32),
+            "note_confidence": note_conf,
+            "chroma":      chroma,
         }

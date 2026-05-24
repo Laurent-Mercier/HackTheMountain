@@ -62,7 +62,9 @@ class Dashboard:
 
         pc = features["pitch_class"]
         octave = features["note"] // 12 - 1
-        note_strength = float(features["chroma"][pc])
+        note_strength = float(
+            features.get("note_confidence", features["chroma"][pc])
+        )
         note = f"{NOTES[pc]}{octave}" if note_strength > 0.20 else "--"
         bpm_str = f"{features['bpm']:.1f}" if features["bpm"] > 0 else "---"
 

@@ -14,9 +14,9 @@ import numpy as np
 # Streaming / timing                                                          #
 # --------------------------------------------------------------------------- #
 
-#: Samples per audio block. ``512 @ 44.1 kHz`` is ~12 ms of latency (lower
-#: delay for mic/midi). FFT bin width is ~86 Hz (4× coarser than 2048).
-CHUNK: Final[int] = 512
+#: Samples per audio block. ``2048 @ 44.1 kHz`` is ~46 ms of latency; FFT bin
+#: width is ~21.5 Hz (better note/chroma accuracy than 512/1024).
+CHUNK: Final[int] = 2048
 
 #: Dashboard refresh rate (Hz). The OSC stream is *not* rate-limited; only
 #: the on-screen render is throttled so the terminal can keep up.
@@ -63,6 +63,26 @@ CREST_LOG_MAX: Final[float] = float(np.log(12.0))
 
 #: Floor for the dBFS readout. ``rms ≤ 1e-4`` reads as ``-80 dB``.
 VOLUME_DB_FLOOR: Final[float] = -80.0
+
+# --------------------------------------------------------------------------- #
+# Pitch (librosa pYIN)                                                        #
+# --------------------------------------------------------------------------- #
+
+#: Fundamental frequency search range (Hz) — roughly C2..C7.
+PITCH_FMIN_HZ: Final[float] = 65.41
+PITCH_FMAX_HZ: Final[float] = 2093.0
+
+#: Ignore pYIN when RMS is below this (silence / noise floor).
+PITCH_MIN_RMS: Final[float] = 1e-3
+
+#: ``voiced_probs`` must exceed this to accept a frame (0..1).
+PITCH_VOICED_THRESH: Final[float] = 0.45
+
+#: EMA weight on new f0 estimates (higher = snappier, lower = steadier).
+PITCH_SMOOTH_ALPHA: Final[float] = 0.4
+
+#: Per-chunk confidence decay when unvoiced (for ``--`` on the dashboard).
+PITCH_CONFIDENCE_DECAY: Final[float] = 0.85
 
 # --------------------------------------------------------------------------- #
 # Pitch labelling                                                             #
