@@ -394,6 +394,10 @@ container mounts that socket and plays through your normal desktop audio.
 
 ### macOS / Windows
 
+`play.sh` uses the **`COMPOSE_FILE`** environment variable (not multiple
+`-f` flags) so `compose rm --force` works on Docker Desktop — a bare
+`compose rm -f` after `-f docker-compose.yml` is parsed as two compose files.
+
 Docker cannot see Core Audio / WASAPI directly. Instead the producer
 talks to **PulseAudio running on the host** over TCP:
 
@@ -425,15 +429,16 @@ mapping and bridge networking both work. No `network_mode: host` required.
 
 # Direct `docker compose` recipes
 
-On **Linux**, include the audio override file:
+On **Linux**, set `COMPOSE_FILE` (or pass multiple `-f` flags yourself):
 
 ```bash
 cd audio
 export OSC_HOST=receiver PULSE_SERVER=unix:/run/pulse/native
-docker compose -f docker-compose.yml -f docker-compose.linux.yml build
+export COMPOSE_FILE="$PWD/docker-compose.yml:$PWD/docker-compose.linux.yml"
+docker compose build
 
-docker compose -f docker-compose.yml -f docker-compose.linux.yml run --rm receiver
-docker compose -f docker-compose.yml -f docker-compose.linux.yml run --rm music "Darude - Sandstorm.mp3"
+docker compose run --rm receiver
+docker compose run --rm music "Darude - Sandstorm.mp3"
 ```
 
 On **macOS / Windows**, start `./scripts/host-pulse-tcp.sh` first, then

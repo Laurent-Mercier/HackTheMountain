@@ -61,6 +61,24 @@ load_saved_route() {
     return 0
 }
 
+# Prefer V2 plugin; fall back to docker-compose (common on older macOS installs).
+detect_compose() {
+    if docker compose version >/dev/null 2>&1; then
+        COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        COMPOSE="docker-compose"
+    else
+        echo "[play] need 'docker compose' (Compose V2) or docker-compose" >&2
+        exit 1
+    fi
+}
+
+# Run compose with COMPOSE_FILE set (never embed -f in $COMPOSE — it breaks
+# 'compose rm -f' on macOS/Docker Desktop: the second -f is read as a file).
+compose() {
+    $COMPOSE "$@"
+}
+
 sync_pulse_defaults() {
     if command -v pactl >/dev/null 2>&1; then
         if [ -z "${PULSE_SINK:-}" ]; then
@@ -75,13 +93,14 @@ sync_pulse_defaults() {
 }
 
 setup_compose_env() {
-    COMPOSE="docker compose -f docker-compose.yml"
+    detect_compose
+    export COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
     export OSC_HOST="${OSC_HOST:-receiver}"
     export OSC_PORT="${OSC_PORT:-9000}"
 
     case "$(uname -s)" in
         Linux)
-            COMPOSE="$COMPOSE -f docker-compose.linux.yml"
+            export COMPOSE_FILE="$COMPOSE_FILE:$SCRIPT_DIR/docker-compose.linux.yml"
             export PULSE_SERVER="${PULSE_SERVER:-unix:/run/pulse/native}"
             if [ "${SPLIT_AUDIO:-0}" != 1 ] && [ "${PICK_AUDIO:-0}" != 1 ] \
                 && [ "${USE_SAVED_ROUTE:-0}" != 1 ]; then
@@ -102,7 +121,6 @@ setup_compose_env() {
             audio_note="Pulse TCP (see ./scripts/host-pulse-tcp.sh)"
             ;;
     esac
-    export COMPOSE
 }
 
 remove_stale_containers() {
@@ -116,8 +134,8 @@ cleanup() {
     trap '' EXIT INT TERM HUP
     printf '\n[play] stopping containers...\n'
     remove_stale_containers
-    $COMPOSE kill music mic midi receiver 2>/dev/null || true
-    $COMPOSE rm -f --remove-orphans music mic midi receiver 2>/dev/null || true
+    compose kill music mic midi receiver 2>/dev/null || true
+    compose rm --force --remove-orphans music mic midi receiver 2>/dev/null || true
 }
 
 MODE="${1:-music}"
@@ -172,7 +190,7 @@ case "$MODE" in
     list-devices|devices|list)
         setup_compose_env
         remove_stale_containers
-        exec $COMPOSE run --rm list-devices ;;
+        compose run --rm list-devices ;;
     pulse-routes|pulse|pactl)
         if ! command -v pactl >/dev/null 2>&1; then
             echo "[play] pactl not found (install PipeWire/Pulse)" >&2
@@ -271,26 +289,26 @@ fi
 echo
 
 echo "[play] building ht-receiver..."
-$COMPOSE build receiver
+compose build receiver
 
 echo "[play] building ht-audio..."
-$COMPOSE build "$SENDER"
+compose build "$SENDER"
 
 echo "[play] starting receiver (UDP :${OSC_PORT} published on host)..."
-$COMPOSE up -d --no-deps --force-recreate --remove-orphans receiver
+compose up -d --no-deps --force-recreate --remove-orphans receiver
 sleep 0.5
 
 echo "[play] starting sender: $sender_label"
-$COMPOSE up -d --no-deps --force-recreate --remove-orphans "$SENDER"
+compose up -d --no-deps --force-recreate --remove-orphans "$SENDER"
 
-CONTAINER=$($COMPOSE ps -q --status running receiver | head -n1)
+CONTAINER=$(compose ps -q --status running receiver | head -n1)
 if [ -z "$CONTAINER" ]; then
     echo "[play] receiver not running:" >&2
-    $COMPOSE logs receiver >&2
+    compose logs receiver >&2
     exit 1
 fi
 
-SENDER_CONTAINER=$($COMPOSE ps -q --status running "$SENDER" | head -n1)
+SENDER_CONTAINER=$(compose ps -q --status running "$SENDER" | head -n1)
 if [ -n "$SENDER_CONTAINER" ]; then
     sleep 1.5
     echo "[play] sender startup:"
