@@ -29,18 +29,46 @@ layout(set = 3, binding = 1) uniform AudioUniforms {
 layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
+// ── Generic utilities (reusable with any dist function) ───────────────────────
+
+vec3 cosine_palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+// Diffuse + tinted specular Phong. ambient in [0,1], shininess > 0.
+vec3 phong(vec3 col, vec3 normal, vec3 light, vec3 view, float ambient, float shininess) {
+    float diff = max(dot(normal, light), 0.0);
+    vec3  refl = reflect(-light, normal);
+    float spec = pow(max(dot(refl, view), 0.0), shininess);
+    return col * (ambient + (1.0 - ambient) * diff) + col * 0.6 * spec;
+}
+
+// mouse is [0,1] with Y=0 at top; map to a world-space light direction.
+vec3 mouse_light() {
+    return normalize(vec3(1.0 - mouse * 2.0, -1.0));
+}
+
+// Fast scalar hash for a 3D integer cell index.
+float cell_hash(vec3 cell_id) {
+    return fract(sin(dot(cell_id, vec3(127.1, 311.7, 74.4))) * 43758.5453);
+}
+
+// ── Ray marching constants ────────────────────────────────────────────────────
+
 const float MAXIMUM_TRACE_DISTANCE = 1000.0;
 const int   NUMBER_OF_STEPS        = 128;
 const float MINIMUM_HIT_DISTANCE   = 0.001;
 
-const float CELL_SIZE              = 2.0;
-const int   N_ITER                 = 16;
-const int   EXP                    = 8;
+// ── Fractal distance estimator (Mandelbulb, tiled) ───────────────────────────
+
+const float CELL_SIZE = 2.2;
+const int   N_ITER    = 16;
+const int   EXP       = 8;
 
 float dist(vec3 p, out vec4 trap) {
     p.xyz = mod(p.xzy, CELL_SIZE) - 0.5 * CELL_SIZE;
-    vec3 w = p;
-    float r = 0.0;
+    vec3  w  = p;
+    float r  = 0.0;
     float dr = 1.0;
 
     trap = vec4(abs(w), r);
@@ -48,117 +76,87 @@ float dist(vec3 p, out vec4 trap) {
     for (int i = 0; i < N_ITER; ++i) {
         r = length(w);
         if (r > 2.0) break;
-        float phi = atan(w.y, w.x);
-        float theta = acos(w.z/r);
 
-        float n_theta = EXP * theta;
-        float n_phi = EXP * phi;
+        float phi   = atan(w.y, w.x);
+        float theta = acos(w.z / r);
 
         dr = pow(r, EXP - 1.0) * EXP * dr + 1.0;
-        w = p + pow(r, EXP) * vec3(sin(n_theta)*cos(n_phi), sin(n_theta)*sin(n_phi), cos(n_theta));
+
+        float zr = pow(r, EXP);
+        w = p + zr * vec3(sin(float(EXP) * theta) * cos(float(EXP) * phi),
+                          sin(float(EXP) * theta) * sin(float(EXP) * phi),
+                          cos(float(EXP) * theta));
         trap = min(trap, vec4(abs(w), r));
     }
 
     trap = vec4(r, trap.yzw);
-
     return 0.5 * log(r) * r / dr;
 }
+
+// ── Shape-agnostic ray marching helpers ──────────────────────────────────────
 
 float ray_march(vec3 ro, vec3 rd, out vec4 trap) {
     float traveled = 0.0;
     for (int i = 0; i < NUMBER_OF_STEPS; ++i) {
-        float distance = dist(ro + rd * traveled, trap);
-        if (distance < MINIMUM_HIT_DISTANCE) return traveled;
+        float d = dist(ro + rd * traveled, trap);
+        if (d < MINIMUM_HIT_DISTANCE) return traveled;
         if (traveled > MAXIMUM_TRACE_DISTANCE) break;
-        traveled += distance;
+        traveled += d;
     }
     return MAXIMUM_TRACE_DISTANCE;
 }
 
 vec3 calc_normal(vec3 p) {
     const float e = 0.001;
-    vec4 _trash;
+    vec4 _t;
     return normalize(vec3(
-        dist(p + vec3(e, 0, 0), _trash) - dist(p - vec3(e, 0, 0), _trash),
-        dist(p + vec3(0, e, 0), _trash) - dist(p - vec3(0, e, 0), _trash),
-        dist(p + vec3(0, 0, e), _trash) - dist(p - vec3(0, 0, e), _trash)
+        dist(p + vec3(e, 0, 0), _t) - dist(p - vec3(e, 0, 0), _t),
+        dist(p + vec3(0, e, 0), _t) - dist(p - vec3(0, e, 0), _t),
+        dist(p + vec3(0, 0, e), _t) - dist(p - vec3(0, 0, e), _t)
     ));
 }
 
+// ── Main ─────────────────────────────────────────────────────────────────────
+
 void main() {
-    // v_uv: (0,0) = bottom-left, (1,1) = top-right
     vec2 uv = v_uv * 2.0 - 1.0;
     uv.y /= aspect;
 
-    vec3 ray_origin    = vec3(0.0, 0.0, log(time)-4.0);
-    vec3 ray_direction = normalize(vec3(uv, 1.0));
+    vec3  ray_origin    = vec3(0.0, 0.0, log(time) - 4.0);
+    vec3  ray_direction = normalize(vec3(uv, 1.0));
 
-    vec4 trap;
+    vec4  trap;
     float t = ray_march(ray_origin, ray_direction, trap);
 
-    // Trap values from the fractal iteration:
-    // trap.x = final escape radius
-    // trap.y = minimum absolute y-component during iteration
-    // trap.z = minimum absolute z-component during iteration
+    // Orbit trap → single palette parameter
+    // trap.x = final r, trap.y = min|w.y|, trap.z = min|w.z|
+    float fy = 1.0 - smoothstep(0.0, 0.7, trap.y);
+    float fz = 1.0 - smoothstep(0.0, 0.7, trap.z);
+    float fx = smoothstep(2.0, 6.0, trap.x);
+    float s  = clamp(fy * 0.30 + fz * 0.60 + fx * 0.4, 0.0, 1.0);
 
-    // === Trap-to-Color Weights ===
-    // How much each trap component influences the final color parameter
-    const float WEIGHT_Y_COMPONENT = 0.30; 
-    const float WEIGHT_Z_COMPONENT = 0.60;
-    const float WEIGHT_ESCAPE_RADIUS = 0.4;
-
-    // === Smoothstep Ranges for Trap Components ===
-    const float COMPONENT_MIN_THRESHOLD = 0.0;  // Start of smoothstep ramp
-    const float COMPONENT_MAX_THRESHOLD = 0.7;  // End of smoothstep ramp
-    const float ESCAPE_MIN_THRESHOLD = 2.0;     // Low escape values
-    const float ESCAPE_MAX_THRESHOLD = 6.0;     // High escape values
-
-    // === Cosine Palette Parameters ===
-    // Formula: color = baseline + amplitude * cos(2π * (frequency * t + phase))
-    const vec3 PALETTE_BASELINE = vec3(0.35, 0.26, 0.35);  // Baseline color (center point of oscillation)
-    const vec3 PALETTE_AMPLITUDE = vec3(0.28, 0.22, 0.25); // Amplitude (how far colors swing from baseline)
-    const vec3 PALETTE_FREQUENCY = vec3(1.0, 0.9, 0.6);    // Frequency (how fast colors cycle through the palette)
-                                                           //
-    // Phase offset (starting point in the color cycle)
-    const vec3 PALETTE_PHASE = vec3(0.05, 0.35, 0.6);  // Shifted phases create hue variation
-    const float TWO_PI = 6.28318;
-
-    // === Compute Color Parameter ===
-    // Invert y/z proximity (closer to axis = higher value)
-    float y_influence = 1.0 - smoothstep(COMPONENT_MIN_THRESHOLD, COMPONENT_MAX_THRESHOLD, trap.y);
-    float z_influence = 1.0 - smoothstep(COMPONENT_MIN_THRESHOLD, COMPONENT_MAX_THRESHOLD, trap.z);
-
-    // Map escape radius to 0-1
-    float escape_influence = smoothstep(ESCAPE_MIN_THRESHOLD, ESCAPE_MAX_THRESHOLD, trap.x);
-
-    // Blend all influences into single parameter (clamped to valid range)
-    float color_parameter = clamp(
-        y_influence * WEIGHT_Y_COMPONENT + 
-        z_influence * WEIGHT_Z_COMPONENT + 
-        escape_influence * WEIGHT_ESCAPE_RADIUS, 
-        0.0, 
-        1.0
-    );
-
-    // === Apply Cosine Palette ===
-    // Generates smooth color gradients: deep purple → dark teal → rust → ochre
-    vec3 col = PALETTE_BASELINE + PALETTE_AMPLITUDE * cos(TWO_PI * (PALETTE_FREQUENCY * color_parameter + PALETTE_PHASE));
+    const vec3 PA        = vec3(0.35, 0.26, 0.35);
+    const vec3 PB        = vec3(0.28, 0.22, 0.25);
+    const vec3 PC        = vec3(1.0,  0.9,  0.6);
+    const vec3 PD        = vec3(0.05, 0.35, 0.6);
+    const vec3 FOG_COLOR = vec3(0.04, 0.03, 0.06);
 
     if (t < MAXIMUM_TRACE_DISTANCE) {
-        vec3 hit    = ray_origin + ray_direction * t;
-        vec3 normal = calc_normal(hit);
+        vec3  hit    = ray_origin + ray_direction * t;
+        vec3  normal = calc_normal(hit);
 
-        vec3 light  = normalize(vec3(mouse * 2.0 - 1.0, -1.0));
-        float diff  = max(dot(normal, light), 0.0);
+        // Per-cell palette nudge to break tile uniformity
+        float cell_h = cell_hash(floor(hit.xzy / CELL_SIZE));
+        float sc     = clamp(s + cell_h * 0.22 - 0.11, 0.0, 1.0);
+        vec3  col    = cosine_palette(sc, PA, PB, PC, PD);
 
+        vec3 light  = mouse_light();
         vec3 view   = normalize(-ray_direction);
-        vec3 refl   = reflect(-light, normal);
-        float spec  = pow(max(dot(refl, view), 0.0), 48.0);
+        vec3 shaded = phong(col, normal, light, view, 0.1, 48.0);
 
-        // Tinted specular keeps highlights in palette; no gamma to avoid further brightening
-        vec3 shaded = col * (0.1 + 0.85 * diff) + col * 0.6 * spec;
-        out_color   = vec4(shaded, 1.0);
+        shaded = mix(FOG_COLOR, shaded, exp(-t * 0.1));
+        out_color = vec4(shaded, 1.0);
     } else {
-        out_color = vec4(0.67, 0.84, 0.91, 1.0);
+        out_color = vec4(FOG_COLOR, 1.0);
     }
 }
