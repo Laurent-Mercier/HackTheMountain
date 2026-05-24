@@ -33,7 +33,7 @@ mat2 rot(float x) {return mat2(cos(x), sin(x), -sin(x), cos(x));}
 vec3 palette(float t) {return vec3(.5) + vec3(.5) * cos(6.28318 * (vec3(1) * t * 0.1 + vec3(0, .33, .67)));}
 
 float get_time() {
-    return time + audio.bass * 2;
+    return time + audio.bass * 0.8;
 }
 
 vec3 tile(vec3 p) {
@@ -60,7 +60,7 @@ vec3 map(vec3 p) {
     vec3 q = p;
     for (int i = 0; i < 8; i++) {
         q = mod(q - 1., 2.) - 1.;
-        q -= sign(q) * (0.05 + sin(get_time() * 0.14) * 0.02);
+        q -= sign(q) * (0.05 + sin(get_time() * 0.14) * 0.02 + (1.0 - audio.smoothness) * 0.02);
         float k = (1.1 + sin(get_time() * 0.1) * -0.1) / dot(q, q);
         q *= k;
         scale *= k;
@@ -69,7 +69,7 @@ vec3 map(vec3 p) {
     float t = (.25 * length(q) / scale);
 
     p = tile(p);
-    float b = SDF_sphere(p - vec3(1), 0.46);
+    float b = SDF_sphere(p - vec3(1), SD + audio.bass * 0.08);
 
     return vec3(nearest(vec2(t, 1.), vec2(b, 2.)), b);
 }
@@ -85,7 +85,7 @@ vec2 csqr(vec2 a) {return vec2(a.x * a.x - a.y * a.y, 2.0 * a.x * a.y);}
 float fractal(vec3 p) {
 	
 	float res = 0.0;
-	float x = .7;
+	float x = 0.7 + (1.0 - audio.smoothness) * 0.07;
 
     p = tile(p);
     p.yz *= rot(get_time() * .6);
@@ -106,7 +106,7 @@ float fractal_march(vec3 ro, vec3 rd) {
     for (int i = 0; i < 50; i++) {
         vec3 p = ro + t * rd;
         vec3 q = tile(p);
-        float b = SDF_sphere(q - vec3(1), SD);
+        float b = SDF_sphere(q - vec3(1), SD + audio.bass * 0.08);
         if (b > EPS) break;
         float bc = SDF_sphere(q - vec3(1), .01);
         bc = 1. / (1. + bc * bc * 20.);
@@ -126,7 +126,7 @@ vec3 render(vec3 ro, vec3 rd) {
     float t = MAXIMUM_TRACE_DISTANCE;
 
     vec3 light_dir = normalize(vec3(3., 4., -1.));
-    vec3 base_tint = palette(get_time());
+    vec3 base_tint = palette(time + audio.centroid_n * 15.0 + audio.treble * 8.0);
     vec3 background = vec3(0.);
 
     vec3 color = vec3(0.);
@@ -173,8 +173,8 @@ vec3 render(vec3 ro, vec3 rd) {
 }
 
 void camera(vec2 uv, inout vec3 ro, inout vec3 rd, inout vec3 lookat) {
-    ro = lookat - vec3(0, sin(get_time() * 0.2) * 0.3, -3.0); 
-    ro.xz *= rot(get_time() * 0.1);
+    ro = lookat - vec3(0, sin(time * 0.2) * 0.3, -3.0 - audio.mid * 0.35);
+    ro.xz *= rot(time * 0.1);
 
     vec3 fwd = normalize(lookat - ro);
     vec3 rgt = normalize(vec3(fwd.z, 0., -fwd.x)); 
