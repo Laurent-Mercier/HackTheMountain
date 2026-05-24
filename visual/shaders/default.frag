@@ -29,92 +29,46 @@ layout(set = 3, binding = 1) uniform AudioUniforms {
 layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 out_color;
 
-// ── Generic utilities (reusable with any dist function) ───────────────────────
+mat2 rot(float x) {return mat2(cos(x), sin(x), -sin(x), cos(x));}
+vec3 palette(float t) {return vec3(.5) + vec3(.5) * cos(6.28318 * (vec3(1) * t * 0.1 + vec3(0, .33, .67)));}
 
-vec3 cosine_palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
-    return a + b * cos(6.28318 * (c * t + d));
+vec3 tile(vec3 p) {
+    return abs(mod(p, 2.), -1.);
 }
 
-// Diffuse + tinted specular Phong. ambient in [0,1], shininess > 0.
-vec3 phong(vec3 col, vec3 normal, vec3 light, vec3 view, float ambient, float shininess) {
-    float diff = max(dot(normal, light), 0.0);
-    vec3  refl = reflect(-light, normal);
-    float spec = pow(max(dot(refl, view), 0.0), shininess);
-    return col * (ambient + (1.0 - ambient) * diff) + col * 0.6 * spec;
+float SDF_sphere(vec3 p, float r) {
+    return length(p) - r;
 }
 
-// mouse is [0,1] with Y=0 at top; map to a world-space light direction.
-vec3 mouse_light() {
-    return normalize(vec3(1.0 - mouse * 2.0, -1.0));
+vec2 nearest(vec2 a, vec2 b) {
+    return mix(a, b, step(b.x, a.x));
 }
-
-// Fast scalar hash for a 3D integer cell index.
-float cell_hash(vec3 cell_id) {
-    return fract(sin(dot(cell_id, vec3(127.1, 311.7, 74.4))) * 43758.5453);
-}
-
-// ── Ray marching constants ────────────────────────────────────────────────────
 
 const float MAXIMUM_TRACE_DISTANCE = 1000.0;
 const int   NUMBER_OF_STEPS        = 128;
 const float MINIMUM_HIT_DISTANCE   = 0.001;
 
-// ── Fractal distance estimator (Mandelbulb, domain-warped) ───────────────────
+vec3 map(vec3 p) {
+    float scale = 1.;
 
-const int N_ITER = 16;
-const int EXP    = 8;
-
-float dist(vec3 p, out vec4 trap) {
-    // Two-layer domain warp — large scale deformation then medium detail.
-    // Lipschitz sum ~0.55 so DE stays valid; layers use orthogonal axes to
-    // avoid cancellation and keep the warp spatially varied.
-    p += 0.35 * vec3(sin(p.y * 0.8 + time * 0.25),
-                     sin(p.z * 0.9 + time * 0.20),
-                     sin(p.x * 0.7 + time * 0.22));
-    p += 0.12 * vec3(sin(p.z * 1.8 + time * 0.40),
-                     sin(p.x * 2.0 + time * 0.35),
-                     sin(p.y * 1.6 + time * 0.38));
-
-    vec3  w  = p;
-    float r  = 0.0;
-    float dr = 1.0;
-
-    trap = vec4(abs(w), r);
-
-    for (int i = 0; i < N_ITER; ++i) {
-        r = length(w);
-        if (r > 2.0) break;
-
-        float phi   = atan(w.y, w.x);
-        float theta = acos(w.z / r);
-
-        dr = pow(r, EXP - 1.0) * EXP * dr + 1.0;
-
-        float zr = pow(r, EXP);
-        w = p + zr * vec3(sin(float(EXP) * theta) * cos(float(EXP) * phi),
-                          sin(float(EXP) * theta) * sin(float(EXP) * phi),
-                          cos(float(EXP) * theta));
-        trap = min(trap, vec4(abs(w), r));
+    vec3 q = p;
+    for (int i = 0; i < 8; i++) {
+        q = mod(q - 1., 2.) - 1.;
+        q -= sign(q) * (0.05 + sin(time * 0.14) * 0.02);
+        float k = (1.1 + sin(time * 0.1) * -0.1) / dot(q, q);
+        q *= k;
+        scale *= k;
     }
 
-    trap = vec4(r, trap.yzw);
-    return (0.5 * log(r) * r / dr);
+    float t = (.25 * length(q) / scale);
+
+    p = tile(p);
+    float b = SDF_sphere(p - vec3(1), 0.46);
+
+    return vec3(nearest(vec2(t, 1.), vec2(b, 2.)), b);
 }
 
-// ── Shape-agnostic ray marching helpers ──────────────────────────────────────
-
-float ray_march(vec3 ro, vec3 rd, out vec4 trap) {
-    float traveled = 0.0;
-    for (int i = 0; i < NUMBER_OF_STEPS; ++i) {
-        float d = dist(ro + rd * traveled, trap);
-        if (d < MINIMUM_HIT_DISTANCE) return traveled;
-        if (traveled > MAXIMUM_TRACE_DISTANCE) break;
-        traveled += d;
-    }
-    return MAXIMUM_TRACE_DISTANCE;
-}
-
-vec3 calc_normal(vec3 p) {
+vec3 normal(vec3 p) {
     const float e = 0.001;
     vec4 _t;
     return normalize(vec3(
@@ -124,7 +78,108 @@ vec3 calc_normal(vec3 p) {
     ));
 }
 
-// ── Soft shadow ───────────────────────────────────────────────────────────────
+vec2 csqr(vec2 a) {return vec2(a.x * a.x - a.y * a.y, 2.0 * a.x * a.y);}
+
+float fractal(vec3 p) {
+	
+	float res = 0.0;
+	float x = .7;
+
+    p = tile(p);
+    p.yz *= rot(time * .6);
+
+    vec3 c = p;
+	
+    for (int i = 0; i < 10; ++i) {
+        p = x * abs(p) / dot(p, p) - x;
+        p.yz = csqr(p.yz);
+        p = p.zxy;
+        res += exp(-19. * abs(dot(p, c)));   
+	}
+    return res / 2.;
+}
+
+float fractal_march(vec3 ro, vec3 rd) {
+    float c = 0., t = EPS;
+    for (int i = 0; i < 50; i++) {
+        vec3 p = ro + t * rd;
+        vec3 q = tile(p);
+        float b = SDF_sphere(q - vec3(1), SD);
+        if (b > EPS) break;
+        float bc = SDF_Sphere(q - vec3(1), .01);
+        bc = 1. / (1. + bc * bc * 20.);
+        float fs = fractal(p); 
+        t += 0.02 * exp(-2.0 * fs);
+
+        c += 0.04 * bc;
+    } 
+    return c;
+}
+
+vec3 render(vec3 ro, vec3 rd) {
+    float traveled = 0.0;
+    float id = 0.0;
+    vec3 p = vec3(0.);
+
+    float t = MAXIMUM_TRACE_DISTANCE;
+
+    vec3 light_dir = normalize(vec3(3., 4., -1.));
+    vec3 base_tint = palette(time);
+    vec3 background = vec3(0.);
+
+    vec3 color = vec3(0.);
+    for (int i = 0; i < NUMBER_OF_STEPS; ++i) {
+        p = ro + rd * traveled;
+        vec3 nearest = map(p);
+        if (traveled > MAXIMUM_TRACE_DISTANCE || nearest.x < MINIMUM_HIT_DISTANCE) {
+            id = nearest.y;
+            break;
+        }
+
+        float glow = 1. / (1. + nearest.z * nearest.z * 140.);
+        bg += base_tint * glow * 0.03;
+
+        traveled += d;
+    }
+
+    if (id >0.0) {
+        t = traveled;
+
+        vec3 n = normal(p);
+        float diffuse = max(dot(light_dir, n), 0.05);
+        float specular = pow(max(dot(reflect(-light_dir, n), -rd), 0.), 32.);
+        float fresner = pow(clamp(dot(n, rd)+ 1., 0., 1.), 2.);
+        if (id == 1.) {
+            color = vec3(0.1) * diffuse;
+            color += vec3(0.1, 0.2, 0.4) * max(n.y, 0);
+            color += base_tint * 0.6 * specular;
+        }
+
+        if (id == 2.) {
+            color = base_tint * diffuse * 0.4;
+            color += base_tint * fractal_march(p, rd) * (1. - fresner) * 0.6;
+            color += vec3(1) * specular;
+            fresner = pow(clamp(dot(n, rd) +1., 0., 1.), 2.) * 64.;
+            color += base_tint * fresner * 0.04 * diffuse;
+        }
+    }
+
+    color += background;
+    color *= exp(-0.2 * t);
+
+    return color * 1.6;
+}
+
+void camera(vec2 uv, inout vec3 ro, inout vec3 rd, inout vec3 lookat) {
+    ro = lookat - vec3(0, sin(time * 0.2) * 0.3, -3.0); 
+    ro.xz *= rot(time * 0.1);
+
+    vec3 fwd = normalize(lookat - ro);
+    vec3 rgt = normalize(vec3(fwd.z, 0., -fwd.x)); 
+
+    rd = normalize(fwd + 1.4 * uv.x * rgt + 1.4 * uv.y * cross(fwd, rgt));
+}
+
 
 float soft_shadow(vec3 ro, vec3 rd, float tmin, float tmax, float k) {
     float res = 1.0;
@@ -139,7 +194,8 @@ float soft_shadow(vec3 ro, vec3 rd, float tmin, float tmax, float k) {
     return clamp(res, 0.0, 1.0);
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+
+
 
 void main() {
     vec2 uv = v_uv * 2.0 - 1.0;
@@ -172,7 +228,7 @@ void main() {
         vec3  hit    = ray_origin + ray_direction * t;
         vec3  normal = calc_normal(hit);
 
-        vec3  col   = cosine_palette(s, PA, PB, PC, PD);
+        vec3  col   = palette(s);
         vec3  light = mouse_light();
         vec3  view  = normalize(-ray_direction);
 
