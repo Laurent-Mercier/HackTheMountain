@@ -59,18 +59,22 @@ const float MAXIMUM_TRACE_DISTANCE = 1000.0;
 const int   NUMBER_OF_STEPS        = 128;
 const float MINIMUM_HIT_DISTANCE   = 0.001;
 
-// ── Fractal distance estimator (Mandelbulb, tiled) ───────────────────────────
+// ── Fractal distance estimator (Mandelbulb, domain-warped) ───────────────────
 
-const float CELL_SIZE = 2.2;
-const int   N_ITER    = 16;
-const int   EXP       = 8;
+const int N_ITER = 16;
+const int EXP    = 8;
 
 float dist(vec3 p, out vec4 trap) {
-    vec3 displaced = p;
-    displaced.x += sin(time * 0.5 + p.x * 3.0) * 0.15;
-    displaced.y += cos(-time * 0.7 + p.y * 3.0) * 0.15;
-    displaced.z += sin(time * 0.6 + p.z * 3.0) * 0.15;
-    p.xyz = mod(displaced.xzy, CELL_SIZE) - 0.5 * CELL_SIZE;
+    // Two-layer domain warp — large scale deformation then medium detail.
+    // Lipschitz sum ~0.55 so DE stays valid; layers use orthogonal axes to
+    // avoid cancellation and keep the warp spatially varied.
+    p += 0.35 * vec3(sin(p.y * 0.8 + time * 0.25),
+                     sin(p.z * 0.9 + time * 0.20),
+                     sin(p.x * 0.7 + time * 0.22));
+    p += 0.12 * vec3(sin(p.z * 1.8 + time * 0.40),
+                     sin(p.x * 2.0 + time * 0.35),
+                     sin(p.y * 1.6 + time * 0.38));
+
     vec3  w  = p;
     float r  = 0.0;
     float dr = 1.0;
@@ -120,47 +124,86 @@ vec3 calc_normal(vec3 p) {
     ));
 }
 
+// ── Soft shadow ───────────────────────────────────────────────────────────────
+
+float soft_shadow(vec3 ro, vec3 rd, float tmin, float tmax, float k) {
+    float res = 1.0;
+    float t   = tmin;
+    for (int i = 0; i < 32 && t < tmax; ++i) {
+        vec4 _t;
+        float h = dist(ro + rd * t, _t);
+        res = min(res, k * h / t);
+        if (res < 0.001) break;
+        t += clamp(h, 0.02, 0.2);
+    }
+    return clamp(res, 0.0, 1.0);
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 void main() {
     vec2 uv = v_uv * 2.0 - 1.0;
     uv.y /= aspect;
 
-    vec3  ray_origin    = vec3(0.0, 0.0, time - 4.0);
-    vec3  ray_direction = normalize(vec3(uv, 1.0));
+    // Orbiting look-at camera circling the fractal
+    float cam_r         = 2.8 + 0.2 * cos(time * 0.17);
+    vec3  ray_origin    = cam_r * vec3(cos(time * 0.13), 0.35 * sin(time * 0.09), sin(time * 0.13));
+    vec3  ww            = normalize(-ray_origin);
+    vec3  uu            = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));
+    vec3  vv            = cross(uu, ww);
+    vec3  ray_direction = normalize(uv.x * uu + uv.y * vv + 1.5 * ww);
 
     vec4  trap;
     float t = ray_march(ray_origin, ray_direction, trap);
 
     // Orbit trap → single palette parameter
-    // trap.x = final r, trap.y = min|w.y|, trap.z = min|w.z|
     float fy = 1.0 - smoothstep(0.0, 0.7, trap.y);
     float fz = 1.0 - smoothstep(0.0, 0.7, trap.z);
     float fx = smoothstep(2.0, 6.0, trap.x);
     float s  = clamp(fy * 0.30 + fz * 0.60 + fx * 0.4, 0.0, 1.0);
 
-    const vec3 PA        = vec3(0.35, 0.26, 0.35);
-    const vec3 PB        = vec3(0.28, 0.22, 0.25);
-    const vec3 PC        = vec3(1.0,  0.9,  0.6);
-    const vec3 PD        = vec3(0.05, 0.35, 0.6);
-    const vec3 FOG_COLOR = vec3(0.04, 0.03, 0.06);
+    const vec3 PA        = vec3(0.55, 0.50, 0.65);
+    const vec3 PB        = vec3(0.45, 0.45, 0.35);
+    const vec3 PC        = vec3(1.0,  0.8,  0.6);
+    const vec3 PD        = vec3(0.00, 0.33, 0.67);
+    const vec3 FOG_COLOR = vec3(0.05, 0.04, 0.12);
 
     if (t < MAXIMUM_TRACE_DISTANCE) {
         vec3  hit    = ray_origin + ray_direction * t;
         vec3  normal = calc_normal(hit);
 
-        // Per-cell palette nudge to break tile uniformity
-        float cell_h = cell_hash(floor(hit.xzy / CELL_SIZE));
-        float sc     = clamp(s + cell_h * 0.22 - 0.11, 0.0, 1.0);
-        vec3  col    = cosine_palette(sc, PA, PB, PC, PD);
+        vec3  col   = cosine_palette(s, PA, PB, PC, PD);
+        vec3  light = mouse_light();
+        vec3  view  = normalize(-ray_direction);
 
-        vec3 light  = mouse_light();
-        vec3 view   = normalize(-ray_direction);
-        vec3 shaded = phong(col, normal, light, view, 0.1, 48.0);
+        float shadow = soft_shadow(hit + normal * 0.05, light, 0.05, 8.0, 6.0);
+        float occ    = clamp(0.05 * log(trap.x + 1.0), 0.0, 1.0);
+        float rim    = clamp(1.0 + dot(ray_direction, normal), 0.0, 1.0);
 
-        shaded = mix(FOG_COLOR, shaded, exp(-t * 0.1));
+        float diff = max(dot(normal, light), 0.0) * shadow;
+        vec3  refl = reflect(-light, normal);
+        float spec = pow(max(dot(refl, view), 0.0), 48.0) * shadow;
+
+        vec3  fill  = normalize(vec3(-light.x, -0.5, -light.z));
+        float diff2 = clamp(0.4 + 0.6 * dot(fill, normal), 0.0, 1.0) * occ;
+
+        vec3 lin = vec3(0.0);
+        lin += 1.5 * vec3(1.0, 1.0, 1.0) * diff;
+        lin += 0.5 * vec3(0.2, 0.3, 0.4) * diff2;
+        lin += 0.4 * vec3(0.1, 0.2, 0.3) * (0.5 + 0.5 * normal.y) * (0.2 + 0.8 * occ);
+        lin += 0.4 * vec3(0.6, 0.8, 1.0) * rim * rim;
+
+        vec3 shaded = col * lin;
+        shaded = pow(max(shaded, vec3(0.0)), vec3(0.8, 0.9, 1.0));
+        shaded += vec3(0.9) * spec * 4.0;
+
+        shaded = mix(FOG_COLOR, shaded, exp(-t * 0.04));
+        shaded = pow(max(shaded, vec3(0.0)), vec3(0.4545));
         out_color = vec4(shaded, 1.0);
     } else {
-        out_color = vec4(FOG_COLOR, 1.0);
+        // Sky gradient: dark base with sun glow toward mouse light
+        vec3 sky = FOG_COLOR * (0.7 + 0.3 * ray_direction.y);
+        sky += vec3(0.3, 0.2, 0.1) * pow(max(dot(ray_direction, mouse_light()), 0.0), 6.0);
+        out_color = vec4(pow(max(sky, vec3(0.0)), vec3(0.4545)), 1.0);
     }
 }
