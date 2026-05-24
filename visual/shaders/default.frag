@@ -96,21 +96,53 @@ void main() {
     vec4 trap;
     float t = ray_march(ray_origin, ray_direction, trap);
 
-    // trap.x = final r, trap.y = min|w.y|, trap.z = min|w.z|
-    float fy = 1.0 - smoothstep(0.0, 0.7, trap.y);
-    float fz = 1.0 - smoothstep(0.0, 0.7, trap.z);
-    float fx = smoothstep(2.0, 6.0, trap.x);
+    // Trap values from the fractal iteration:
+    // trap.x = final escape radius
+    // trap.y = minimum absolute y-component during iteration
+    // trap.z = minimum absolute z-component during iteration
 
-    // Single blended parameter drives a cosine palette → bounded brightness, no stacking
-    float s = clamp(fy * 0.55 + fz * 0.35 + fx * 0.1, 0.0, 1.0);
+    // === Trap-to-Color Weights ===
+    // How much each trap component influences the final color parameter
+    const float WEIGHT_Y_COMPONENT = 0.30; 
+    const float WEIGHT_Z_COMPONENT = 0.60;
+    const float WEIGHT_ESCAPE_RADIUS = 0.4;
 
-    // Cosine palette: bumped baseline (a) and amplitude (b)
-    // Sweeps: deep purple → dark teal → rust → ochre (brighter)
-    vec3 a = vec3(0.35, 0.26, 0.35); // Raised the baseline average
-    vec3 b = vec3(0.28, 0.22, 0.25); // Raised the contrast range
-    vec3 c = vec3(1.0,  0.9,  0.6);  // Kept frequency the same
-    vec3 d = vec3(0.05, 0.35, 0.6);  // Kept phase the same
-    vec3 col = a + b * cos(6.28318 * (c * s + d));
+    // === Smoothstep Ranges for Trap Components ===
+    const float COMPONENT_MIN_THRESHOLD = 0.0;  // Start of smoothstep ramp
+    const float COMPONENT_MAX_THRESHOLD = 0.7;  // End of smoothstep ramp
+    const float ESCAPE_MIN_THRESHOLD = 2.0;     // Low escape values
+    const float ESCAPE_MAX_THRESHOLD = 6.0;     // High escape values
+
+    // === Cosine Palette Parameters ===
+    // Formula: color = baseline + amplitude * cos(2π * (frequency * t + phase))
+    const vec3 PALETTE_BASELINE = vec3(0.35, 0.26, 0.35);  // Baseline color (center point of oscillation)
+    const vec3 PALETTE_AMPLITUDE = vec3(0.28, 0.22, 0.25); // Amplitude (how far colors swing from baseline)
+    const vec3 PALETTE_FREQUENCY = vec3(1.0, 0.9, 0.6);    // Frequency (how fast colors cycle through the palette)
+                                                           //
+    // Phase offset (starting point in the color cycle)
+    const vec3 PALETTE_PHASE = vec3(0.05, 0.35, 0.6);  // Shifted phases create hue variation
+    const float TWO_PI = 6.28318;
+
+    // === Compute Color Parameter ===
+    // Invert y/z proximity (closer to axis = higher value)
+    float y_influence = 1.0 - smoothstep(COMPONENT_MIN_THRESHOLD, COMPONENT_MAX_THRESHOLD, trap.y);
+    float z_influence = 1.0 - smoothstep(COMPONENT_MIN_THRESHOLD, COMPONENT_MAX_THRESHOLD, trap.z);
+
+    // Map escape radius to 0-1
+    float escape_influence = smoothstep(ESCAPE_MIN_THRESHOLD, ESCAPE_MAX_THRESHOLD, trap.x);
+
+    // Blend all influences into single parameter (clamped to valid range)
+    float color_parameter = clamp(
+        y_influence * WEIGHT_Y_COMPONENT + 
+        z_influence * WEIGHT_Z_COMPONENT + 
+        escape_influence * WEIGHT_ESCAPE_RADIUS, 
+        0.0, 
+        1.0
+    );
+
+    // === Apply Cosine Palette ===
+    // Generates smooth color gradients: deep purple → dark teal → rust → ochre
+    vec3 col = PALETTE_BASELINE + PALETTE_AMPLITUDE * cos(TWO_PI * (PALETTE_FREQUENCY * color_parameter + PALETTE_PHASE));
 
     if (t < MAXIMUM_TRACE_DISTANCE) {
         vec3 hit    = ray_origin + ray_direction * t;
