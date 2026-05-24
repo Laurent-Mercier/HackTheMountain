@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/home/laurent/Projets/HackTheMountain/visual/src",
-  "command": "/usr/bin/c++   -std=gnu++23 -Wall -Wextra -Wpedantic -o CMakeFiles/visual.dir/main.cpp.o -c /home/laurent/Projets/HackTheMountain/visual/src/main.cpp",
-  "file": "/home/laurent/Projets/HackTheMountain/visual/src/main.cpp",
-  "output": "CMakeFiles/visual.dir/main.cpp.o"
-}
-]
