@@ -33,7 +33,7 @@ mat2 rot(float x) {return mat2(cos(x), sin(x), -sin(x), cos(x));}
 vec3 palette(float t) {return vec3(.5) + vec3(.5) * cos(6.28318 * (vec3(1) * t * 0.1 + vec3(0, .33, .67)));}
 
 float get_time() {
-    return time + audio.bass * 0.8;
+    return time *0.5;
 }
 
 vec3 tile(vec3 p) {
@@ -56,11 +56,25 @@ const float SD  = 0.46;
 
 vec3 map(vec3 p) {
     float scale = 1.;
+    vec3 displaced = p;
+    // Bass breathing: expand/contract the tiling grid
+    float breath = scale * (1.0 + audio.bass * 0.8);
+    
+    // Mid-frequency ripples
+    displaced.x += sin(time * 0.5 + p.y * 2.0) * audio.mid * 0.25;
+    displaced.y += cos(time * 0.7 + p.z * 2.0) * audio.mid * 0.25;
+    
+    // Treble adds high-frequency distortion
+    displaced += vec3(
+        sin(p.x * 8.0 + time * 2.0),
+        cos(p.y * 8.0 - time * 1.5),
+        sin(p.z * 8.0 + time * 1.8)
+    ) * audio.treble * 0.08;
 
     vec3 q = p;
     for (int i = 0; i < 8; i++) {
         q = mod(q - 1., 2.) - 1.;
-        q -= sign(q) * (0.05 + sin(get_time() * 0.14) * 0.02 + (1.0 - audio.smoothness) * 0.02);
+        q -= sign(q) * (0.05 + sin(get_time() * 0.14) * 0.02 + (1.0 - audio.smoothness) * 0.012);
         float k = (1.1 + sin(get_time() * 0.1) * -0.1) / dot(q, q);
         q *= k;
         scale *= k;
@@ -69,7 +83,7 @@ vec3 map(vec3 p) {
     float t = (.25 * length(q) / scale);
 
     p = tile(p);
-    float b = SDF_sphere(p - vec3(1), SD + audio.bass * 0.08);
+    float b = SDF_sphere(p - vec3(1), SD + audio.bass * 0.05);
 
     return vec3(nearest(vec2(t, 1.), vec2(b, 2.)), b);
 }
@@ -106,7 +120,7 @@ float fractal_march(vec3 ro, vec3 rd) {
     for (int i = 0; i < 50; i++) {
         vec3 p = ro + t * rd;
         vec3 q = tile(p);
-        float b = SDF_sphere(q - vec3(1), SD + audio.bass * 0.08);
+        float b = SDF_sphere(q - vec3(1), SD + audio.bass * 0.05);
         if (b > EPS) break;
         float bc = SDF_sphere(q - vec3(1), .01);
         bc = 1. / (1. + bc * bc * 20.);
@@ -125,8 +139,14 @@ vec3 render(vec3 ro, vec3 rd) {
 
     float t = MAXIMUM_TRACE_DISTANCE;
 
+    float vol = clamp((audio.volume_db + 80.0) / 80.0, 0.0, 1.0);
+
+    // Color driven by harmonic content: average energy per pitch group
+    float chroma_low  = dot(audio.chroma[0], vec4(0.25)); // C C# D D#
+    float chroma_mid_c = dot(audio.chroma[1], vec4(0.25)); // E F F# G
+    vec3 base_tint = palette(time * 0.5 + chroma_low * 2.5 + chroma_mid_c * 1.5);
+
     vec3 light_dir = normalize(vec3(3., 4., -1.));
-    vec3 base_tint = palette(time + audio.centroid_n * 15.0 + audio.treble * 8.0);
     vec3 background = vec3(0.);
 
     vec3 color = vec3(0.);
@@ -153,13 +173,13 @@ vec3 render(vec3 ro, vec3 rd) {
         float fresner = pow(clamp(dot(n, rd)+ 1., 0., 1.), 2.);
         if (id == 1.) {
             color = vec3(0.1) * diffuse;
-            color += vec3(0.1, 0.2, 0.4) * max(n.y, 0);
-            color += base_tint * 0.6 * specular;
+            color += vec3(0.1, 0.2, 0.4) * max(n.y, 0.);
+            color += base_tint * (0.4 + audio.treble * 0.5) * specular;
         }
 
         if (id == 2.) {
             color = base_tint * diffuse * 0.4;
-            color += base_tint * fractal_march(p, rd) * (1. - fresner) * 0.6;
+            color += base_tint * fractal_march(p, rd) * (1. - fresner) * (0.4 + audio.bass * 0.35);
             color += vec3(1) * specular;
             fresner = pow(clamp(dot(n, rd) +1., 0., 1.), 2.) * 64.;
             color += base_tint * fresner * 0.04 * diffuse;
@@ -169,11 +189,11 @@ vec3 render(vec3 ro, vec3 rd) {
     color += background;
     color *= exp(-0.2 * t);
 
-    return color * 1.6;
+    return color * (0.8 + vol);
 }
 
 void camera(vec2 uv, inout vec3 ro, inout vec3 rd, inout vec3 lookat) {
-    ro = lookat - vec3(0, sin(time * 0.2) * 0.3, -3.0 - audio.mid * 0.35);
+    ro = lookat - vec3(0, sin(time * 0.2) * 0.3, -3.0 - audio.mid * 0.25);
     ro.xz *= rot(time * 0.1);
 
     vec3 fwd = normalize(lookat - ro);
