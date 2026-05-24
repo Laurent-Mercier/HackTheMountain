@@ -22,9 +22,7 @@ namespace audio_brain {
 ///   * `smoothness`  — 0 = transient, 1 = sine-like.
 ///   * `centroid_hz` — raw spectral centroid (Hz).
 ///   * `centroid_n`  — log-mapped centroid in [0, 1].
-///   * `note`        — MIDI note number (C-1=0, A4=69, C8=108);
-///                     pitch class = `note % 12`,
-///                     octave      = `note / 12 - 1`.
+///   * `note`        — reserved (sender always 0; use chroma for harmony).
 ///   * `chroma[12]`  — pitch-class energies (C..B), each in [0, 1].
 struct Frame {
     int32_t seq;

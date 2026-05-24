@@ -14,7 +14,6 @@ Example dashboard line group:
   Frequency:  treble       (bass=0.35 mid=0.84 treble=0.89)
   Centroid:    4255 Hz     ( 84 % perceptual)
   Smoothness:  0.66        (0 = spiky, 1 = smooth)
-  Note:        D           (strength 1.00)
   Speed:       129.2 BPM
 ──────────────────────────────────────────────────
 ```
@@ -34,7 +33,7 @@ File mode: `t` goes `0 → total_time`. Mic/midi: both grow together until you s
 
 | Field      | Range                  | Meaning                                                                        |
 | ---------- | ---------------------- | ------------------------------------------------------------------------------ |
-| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~21 Hz (`CHUNK=2048`) that's months of streaming before overflow. |
+| `frame #`  | `0 → 2 147 483 647`    | monotonic sequence; at ~86 Hz (`CHUNK=512`) that's months of streaming before overflow. |
 | `dropped`  | `0 → frame #`          | packets the C++ side never saw, inferred from gaps in `seq`.                   |
 | `X / Y`    | `X` = dropped, `Y` = X + received | `0 / 1860` = perfect run; `3 / 9` = 3 lost out of 9 expected. |
 
@@ -145,42 +144,27 @@ Math:
 - A drum-hit transient has `crest ≈ 8 – 12` → `smoothness ≈ 0.0`
 - Anything in between is log-interpolated.
 
-## Note + strength
+## Chroma (harmony) + reserved `note` field
 
-### Note (label)
+### `note` (OSC index 11)
 
-- **Range:** `<pitch class><octave>`, e.g. `C4`, `A#3`, `G2` — or `--`.
-- **Wire format:** sent as a **MIDI note number** in `args[10]` (int).
-  Convert with: `pitch_class = note % 12` (0=C..11=B), `octave = note / 12 - 1`.
-  Examples: A4 = 69, C4 (middle C) = 60, C2 = 36.
-- `--` is shown when the dominant chroma value is below `0.20` (no clear
-  pitch — drums or noise dominate).
-- **How the note is picked:** :func:`librosa.pyin` estimates the
-  fundamental (f0) on each chunk (C2..C7), median of voiced frames,
-  then EMA smoothing. Chroma on the wire is still STFT-based harmony;
-  the displayed **strength** uses pYIN voiced probability when available.
-- **Limits:** chords still report one note; very noisy or percussive
-  audio may show `--` or lag slightly behind fast runs.
+- **Wire format:** int, always **`0`** (placeholder — not computed).
+- Terminals **do not** show a note line. Use **`chroma[12]`** for harmony.
 
-### Strength
+### `chroma[0..11]` (C, C#, D, … B)
 
-- **Range:** `0.00 → 1.00`.
-- **What it means:** librosa normalizes each chroma frame so the max is
-  `1.0`. This is literally the height of the loudest pitch peak in the
-  spectrum.
+- **Range:** each `0.00 → 1.00` (librosa STFT chroma, max-normalised per frame).
+- **What it means:** energy per pitch **class** (octaves folded together).
+  Good for colour / key-ish visuals, not a single MIDI note name.
 
 | Value         | Meaning                                                        |
 | ------------- | -------------------------------------------------------------- |
-| `< 0.20`      | no clear pitch → label becomes `--`                            |
-| `0.20 – 0.40` | weakly pitched (busy mix, percussion blend)                    |
-| `0.40 – 0.70` | melodic but mixed harmony (chord, several notes)               |
-| `0.70 – 0.95` | clear note with harmonics                                      |
-| `1.00`        | a single pitch class strongly dominates (example: `D 1.00`)    |
+| `0.00 – 0.20` | weak / noisy                                                   |
+| `0.40 – 0.70` | mixed harmony (chords)                                         |
+| `0.70 – 1.00` | one pitch class dominates that chunk                           |
 
-**Important:** `strength = 1.00` does **not** mean *only* one note is
-playing — only that one pitch class is the **strongest** of the 12. Other
-pitches can still be present (e.g. the 5th often sits around `0.7` during
-a held major chord).
+**Important:** several chroma bins can be high at once during chords.
+`argmax(chroma)` is **not** sent as `note` anymore.
 
 ## Speed — BPM
 
@@ -222,7 +206,8 @@ Failure modes to watch for:
 | Centroid (Hz)          | `0`          | `22 050`          | DC                     | Nyquist                    |
 | Centroid %             | `0 %`        | `100 %`           | ≤ 50 Hz (deep sub)     | ≥ 10 kHz (air)             |
 | Smoothness             | `0.00`       | `1.00`            | percussive spike       | pure sine                  |
-| Note strength          | `0.00`       | `1.00`            | no pitch               | one pitch fully dominant   |
+| `note` (reserved)      | `0`          | `0`               | placeholder on wire    | not computed               |
+| chroma (each bin)      | `0.00`       | `1.00`            | weak / noisy           | class dominates chunk      |
 | Speed                  | `−1` / `30 BPM` | `320 BPM`      | unknown / very slow    | very fast                  |
 
 ---
@@ -234,7 +219,7 @@ Failure modes to watch for:
   [`FeatureExtractor`](audio_brain/extractor.py) and
   [`OscSender`](audio_brain/osc.py) for the exact formulas.
 - **Wire format:** OSC over UDP localhost, address `/audio/frame`,
-  ~140 bytes per packet at ~21 Hz (`CHUNK=2048` @ 44.1 kHz). Full schema lives in the `OscSender`
+  ~140 bytes per packet at ~86 Hz (`CHUNK=512` @ 44.1 kHz). Full schema lives in the `OscSender`
   docstring (and is mirrored verbatim in `receiver/include/Frame.hpp`
   and `receiver/src/OscParser.cpp`).
 - **Consumer:** the [`receiver/`](receiver/) C++ module — `UdpListener`,
@@ -253,7 +238,7 @@ Make build path. Everything ships as two container images.
 audio/
 ├── audio_brain/                 # Python package — the producer
 │   ├── __init__.py              # public API re-exports
-│   ├── config.py                # constants (CHUNK, BANDS, NOTES, …)
+│   ├── config.py                # constants (CHUNK, BANDS, …)
 │   ├── osc.py                   # OscSender — OSC wire-format sender
 │   ├── normalizer.py            # RollingPeak — running-peak normaliser
 │   ├── extractor.py             # FeatureExtractor — one FFT, all features

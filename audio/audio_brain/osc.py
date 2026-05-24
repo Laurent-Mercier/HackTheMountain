@@ -35,15 +35,12 @@ class OscSender:
         8   ``smoothness``    float  ``0..1``  1 = sine-like, 0 = transient
         9   ``centroid_hz``   float  raw centroid in Hz
         10  ``centroid_n``    float  ``0..1``  log-mapped (50..10k Hz)
-        11  ``note``          int    MIDI note number
-                                     (C-1=0, A4=69, C8=108)
-                                     - pitch class = ``note % 12``  (0=C)
-                                     - octave      = ``note // 12 - 1``
+        11  ``note``          int    reserved (always ``0``; not computed)
         12..23 ``chroma[12]`` float  pitch-class energies, each ``0..1``
         ============  ======  ============================================
 
-    Payload: ~140 bytes/packet. At ``CHUNK = 2048 @ 44.1 kHz`` that's
-    ~3 KB/s — still tiny on localhost / Docker bridge.
+    Payload: ~140 bytes/packet. At ``CHUNK = 512 @ 44.1 kHz`` that's
+    ~12 KB/s — still tiny on localhost / Docker bridge.
     """
 
     def __init__(

@@ -26,7 +26,7 @@ pipeline classes, re-exported here for convenience.
 """
 from __future__ import annotations
 
-from .config import BAND_LABELS, BANDS, CHUNK, NOTES, PRINT_HZ
+from .config import BAND_LABELS, BANDS, CHUNK, PRINT_HZ
 from .dashboard import Dashboard
 from .devices import find_loopback_input, list_devices, silence_alsa_noise
 from .extractor import FeatureExtractor
@@ -44,7 +44,6 @@ __all__ = [
     "BANDS",
     "BAND_LABELS",
     "CHUNK",
-    "NOTES",
     "PRINT_HZ",
     "BasePipeline",
     "Dashboard",

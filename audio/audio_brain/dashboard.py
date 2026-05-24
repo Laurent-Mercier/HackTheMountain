@@ -6,18 +6,18 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .config import BAND_LABELS, NOTES
+from .config import BAND_LABELS
 
 #: Number of lines drawn by :meth:`Dashboard.render`. The ANSI cursor-up
 #: trick relies on this being constant — keep it in sync with the
 #: ``lines`` list inside :meth:`Dashboard.render`.
-DASHBOARD_HEIGHT = 9
+DASHBOARD_HEIGHT = 8
 
 
 class Dashboard:
     """Multi-line, in-place dashboard renderer.
 
-    The first call prints a 9-line block. Subsequent calls move the
+    The first call prints an 8-line block. Subsequent calls move the
     cursor up :data:`DASHBOARD_HEIGHT` lines and overwrite each line, so
     the values appear to update in place rather than scrolling off the
     top of the terminal.
@@ -60,12 +60,6 @@ class Dashboard:
         bands = [features["bass"], features["mid"], features["treble"]]
         dom_band = BAND_LABELS[int(np.argmax(bands))]
 
-        pc = features["pitch_class"]
-        octave = features["note"] // 12 - 1
-        note_strength = float(
-            features.get("note_confidence", features["chroma"][pc])
-        )
-        note = f"{NOTES[pc]}{octave}" if note_strength > 0.20 else "--"
         bpm_str = f"{features['bpm']:.1f}" if features["bpm"] > 0 else "---"
 
         if total > t + 0.05:
@@ -81,7 +75,6 @@ class Dashboard:
             f"  Centroid:    {features['centroid_hz']:6.0f} Hz    "
             f"({features['centroid_n']*100:3.0f} % perceptual)",
             f"  Smoothness:  {features['smoothness']:.2f}         (0 = spiky, 1 = smooth)",
-            f"  Note:        {note:<2}           (strength {note_strength:.2f})",
             f"  Speed:       {bpm_str:>5} BPM",
             "─" * 50,
         ]
