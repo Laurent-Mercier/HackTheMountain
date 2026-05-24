@@ -66,7 +66,11 @@ const int   N_ITER    = 16;
 const int   EXP       = 8;
 
 float dist(vec3 p, out vec4 trap) {
-    p.xyz = mod(p.xzy, CELL_SIZE) - 0.5 * CELL_SIZE;
+    vec3 displaced = p;
+    displaced.x += sin(time * 0.5 + p.x * 3.0) * 0.15;
+    displaced.y += cos(-time * 0.7 + p.y * 3.0) * 0.15;
+    displaced.z += sin(time * 0.6 + p.z * 3.0) * 0.15;
+    p.xyz = mod(displaced.xzy, CELL_SIZE) - 0.5 * CELL_SIZE;
     vec3  w  = p;
     float r  = 0.0;
     float dr = 1.0;
@@ -90,7 +94,7 @@ float dist(vec3 p, out vec4 trap) {
     }
 
     trap = vec4(r, trap.yzw);
-    return 0.5 * log(r) * r / dr;
+    return (0.5 * log(r) * r / dr);
 }
 
 // ── Shape-agnostic ray marching helpers ──────────────────────────────────────
@@ -122,7 +126,7 @@ void main() {
     vec2 uv = v_uv * 2.0 - 1.0;
     uv.y /= aspect;
 
-    vec3  ray_origin    = vec3(0.0, 0.0, log(time) - 4.0);
+    vec3  ray_origin    = vec3(0.0, 0.0, time - 4.0);
     vec3  ray_direction = normalize(vec3(uv, 1.0));
 
     vec4  trap;
