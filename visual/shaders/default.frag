@@ -35,11 +35,11 @@ vec3 cosine_palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
     return a + b * cos(6.28318 * (c * t + d));
 }
 
-// Diffuse + tinted specular Phong. shadow in [0,1] scales non-ambient terms only.
-vec3 phong(vec3 col, vec3 normal, vec3 light, vec3 view, float ambient, float shininess, float shadow) {
-    float diff = max(dot(normal, light), 0.0) * shadow;
+// Diffuse + tinted specular Phong. ambient in [0,1], shininess > 0.
+vec3 phong(vec3 col, vec3 normal, vec3 light, vec3 view, float ambient, float shininess) {
+    float diff = max(dot(normal, light), 0.0);
     vec3  refl = reflect(-light, normal);
-    float spec = pow(max(dot(refl, view), 0.0), shininess) * shadow;
+    float spec = pow(max(dot(refl, view), 0.0), shininess);
     return col * (ambient + (1.0 - ambient) * diff) + col * 0.6 * spec;
 }
 
@@ -58,7 +58,6 @@ float cell_hash(vec3 cell_id) {
 const float MAXIMUM_TRACE_DISTANCE = 1000.0;
 const int   NUMBER_OF_STEPS        = 128;
 const float MINIMUM_HIT_DISTANCE   = 0.001;
-const float SHADOW_MIN             = 0.4;
 
 // ── Fractal distance estimator (Mandelbulb, tiled) ───────────────────────────
 
@@ -112,29 +111,13 @@ float ray_march(vec3 ro, vec3 rd, out vec4 trap) {
 }
 
 vec3 calc_normal(vec3 p) {
-    const float e = 0.004;
+    const float e = 0.001;
     vec4 _t;
     return normalize(vec3(
         dist(p + vec3(e, 0, 0), _t) - dist(p - vec3(e, 0, 0), _t),
         dist(p + vec3(0, e, 0), _t) - dist(p - vec3(0, e, 0), _t),
         dist(p + vec3(0, 0, e), _t) - dist(p - vec3(0, 0, e), _t)
     ));
-}
-
-// IQ penumbra soft shadow. k controls softness: low (~2) = very soft, high (~16) = hard.
-// ro should be offset by normal * small_epsilon to avoid self-intersection.
-float soft_shadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
-    float res = 1.0;
-    float t   = mint;
-    for (int i = 0; i < 48; ++i) {
-        vec4  _t;
-        float h = dist(ro + rd * t, _t);
-        if (h < MINIMUM_HIT_DISTANCE) return SHADOW_MIN;
-        res = min(res, k * h / t);
-        t  += clamp(h, 0.005, 0.3);
-        if (t > maxt) break;
-    }
-    return clamp(res, SHADOW_MIN, 1.0);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -171,10 +154,9 @@ void main() {
         float sc     = clamp(s + cell_h * 0.22 - 0.11, 0.0, 1.0);
         vec3  col    = cosine_palette(sc, PA, PB, PC, PD);
 
-        vec3  light  = mouse_light();
-        float shadow = soft_shadow(hit + normal * 0.05, light, 0.05, 8.0, 6.0);
-        vec3  view   = normalize(-ray_direction);
-        vec3  shaded = phong(col, normal, light, view, 0.1, 48.0, shadow);
+        vec3 light  = mouse_light();
+        vec3 view   = normalize(-ray_direction);
+        vec3 shaded = phong(col, normal, light, view, 0.1, 48.0);
 
         shaded = mix(FOG_COLOR, shaded, exp(-t * 0.1));
         out_color = vec4(shaded, 1.0);
